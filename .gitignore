@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+coturn/certs/*
+!coturn/certs/.gitkeep
+server/node_modules/
+coverage/

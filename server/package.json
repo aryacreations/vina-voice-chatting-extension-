@@ -1,0 +1,15 @@
+{
+  "name": "voice-chat-signaling-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebSocket signaling server for the Voice Chat Chrome extension",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "check": "node --check src/server.js && node --check test/server.test.js && node --check ../extension/offscreen/offscreen.js && node --check ../extension/background/service-worker.js && node --check ../extension/popup/popup.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

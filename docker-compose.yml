@@ -1,0 +1,84 @@
+services:
+  signaling:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - voice
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      signaling:
+        condition: service_healthy
+    networks:
+      - voice
+
+  coturn:
+    image: coturn/coturn:4.6.3
+    restart: unless-stopped
+    environment:
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env}
+      TURN_REALM: ${TURN_REALM:?Set TURN_REALM in .env}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP in .env}
+      TURN_TLS: ${TURN_TLS:-false}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ "$${TURN_TLS}" = "true" ]; then
+          TLS_ARGS="--tls-listening-port=5349 --cert=/etc/coturn/certs/fullchain.pem --pkey=/etc/coturn/certs/privkey.pem"
+        else
+          TLS_ARGS="--no-tls"
+        fi
+        exec turnserver --no-cli --fingerprint --use-auth-secret \
+          --static-auth-secret="$${TURN_SHARED_SECRET}" --realm="$${TURN_REALM}" \
+          --listening-ip=0.0.0.0 --listening-port=3478 --external-ip="$${TURN_EXTERNAL_IP}" \
+          --min-port=49160 --max-port=49200 --no-multicast-peers $${TLS_ARGS}
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+    volumes:
+      - ./coturn/certs:/etc/coturn/certs:ro
+    networks:
+      - voice
+
+networks:
+  voice:
+
+volumes:
+  caddy_data:
+  caddy_config:
