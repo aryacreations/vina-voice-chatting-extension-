@@ -17,7 +17,7 @@
 * { box-sizing: border-box; }
 
 body {
-  width: 340px;
+  width: 360px;
   margin: 0;
   background:
     radial-gradient(ellipse at 100% 0%, rgba(199, 229, 207, .55), transparent 36%),
@@ -48,7 +48,19 @@ input { width: 100%; min-width: 0; height: 37px; padding: 0 10px; border: 1px so
 input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(29, 113, 92, .1); }
 #server-url { font: 11px 'Consolas', monospace; }
 
-.room-code { margin: 0 0 11px; color: var(--green-dark); font: 500 13px 'Consolas', monospace; letter-spacing: 1px; overflow-wrap: anywhere; }
+.room-code {
+  margin: 6px 0 13px;
+  color: var(--green-dark);
+  font: 800 32px 'Consolas', monospace;
+  letter-spacing: 6px;
+  overflow-wrap: anywhere;
+  text-align: center;
+  padding: 12px 8px;
+  background: rgba(29, 113, 92, .07);
+  border: 1px dashed rgba(29, 113, 92, .25);
+  border-radius: 8px;
+  user-select: all;
+}
 .button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: 6px; padding: 0 13px; font-size: 11px; font-weight: 800; transition: background .16s, transform .16s; }
 .button:hover:not(:disabled) { transform: translateY(-1px); }
 .button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
@@ -76,6 +88,56 @@ input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(29, 113, 92
 .toast { min-height: 13px; margin: 6px 0 0; color: var(--coral); font-size: 10px; }
 footer { padding-top: 8px; border-top: 1px solid var(--line); color: #819087; font: 10px 'Consolas', monospace; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+/* Mic permission guide panel */
+.mic-guide {
+  padding: 18px 0 12px;
+  text-align: center;
+}
+.mic-guide-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #fde8e1;
+  color: var(--coral);
+  margin-bottom: 12px;
+}
+.mic-guide-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.mic-guide-title { margin: 0 0 4px; font-size: 14px; font-weight: 800; color: var(--coral); }
+.mic-guide-sub { margin: 0 0 14px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+.mic-steps {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  text-align: left;
+}
+.mic-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  border-bottom: 1px solid var(--line);
+}
+.mic-steps li:last-child { border-bottom: 0; }
+.step-num {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--green);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  margin-top: 1px;
+}
+
 [hidden] { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {

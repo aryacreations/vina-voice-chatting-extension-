@@ -1,160 +1,209 @@
-const serverUrlInput = document.querySelector("#server-url");
+/* ── element refs ───────────────────────────────────── */
+const serverUrlInput   = document.querySelector("#server-url");
 const createRoomButton = document.querySelector("#create-room");
-const joinForm = document.querySelector("#join-form");
-const joinCodeInput = document.querySelector("#join-code");
-const roomCode = document.querySelector("#room-code");
-const copyRoomButton = document.querySelector("#copy-room");
-const statusText = document.querySelector("#status-text");
-const statusDetail = document.querySelector("#status-detail");
-const signalIndicator = document.querySelector("#signal");
-const callControls = document.querySelector("#call-controls");
-const muteButton = document.querySelector("#mute-button");
-const leaveButton = document.querySelector("#leave-button");
-const enableAudioButton = document.querySelector("#enable-audio");
-const toast = document.querySelector("#toast");
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const joinForm         = document.querySelector("#join-form");
+const joinCodeInput    = document.querySelector("#join-code");
+const roomCode         = document.querySelector("#room-code");
+const copyRoomButton   = document.querySelector("#copy-room");
+const statusText       = document.querySelector("#status-text");
+const statusDetail     = document.querySelector("#status-detail");
+const signalIndicator  = document.querySelector("#signal");
+const callControls     = document.querySelector("#call-controls");
+const muteButton       = document.querySelector("#mute-button");
+const leaveButton      = document.querySelector("#leave-button");
+const enableAudioButton= document.querySelector("#enable-audio");
+const toast            = document.querySelector("#toast");
+const micGuide         = document.querySelector("#mic-guide");
+const mainUi           = document.querySelector("#main-ui");
+const retryBtn         = document.querySelector("#retry-after-settings");
 
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+let lastCallParams = null;   // kept so "Done – Try again" can re-issue the same call
+
+/* ── status labels ──────────────────────────────────── */
 const statusLabels = {
-  idle: "Ready when you are",
-  ended: "Call ended",
-  "requesting-microphone": "Requesting microphone",
-  waiting: "Waiting for someone",
-  connecting: "Connecting audio",
-  connected: "Voice connected",
-  reconnecting: "Connection interrupted",
-  error: "Could not connect",
+  idle:                   "Ready when you are",
+  ended:                  "Call ended",
+  "requesting-microphone":"Connecting…",
+  waiting:                "Waiting for participants",
+  connecting:             "Connecting audio",
+  connected:              "Voice connected",
+  reconnecting:           "Connection interrupted",
+  error:                  "Could not connect",
 };
 
-function setStatus({
-  status = "idle",
-  detail = "",
-  roomId = null,
-  muted = false,
-}) {
+/* ── helpers ────────────────────────────────────────── */
+function showMicGuide() {
+  micGuide.hidden = false;
+  mainUi.hidden   = true;
+}
+function hideMicGuide() {
+  micGuide.hidden = true;
+  mainUi.hidden   = false;
+}
+
+function setStatus({ status = "idle", detail = "", roomId = null, muted = false }) {
   statusText.textContent = statusLabels[status] || status;
   statusDetail.textContent = detail;
   signalIndicator.dataset.state = status;
-  callControls.hidden = ![
-    "requesting-microphone",
-    "waiting",
-    "connecting",
-    "connected",
-    "reconnecting",
-    "error",
-  ].includes(status);
+
+  const inCall = ["requesting-microphone","waiting","connecting","connected","reconnecting","error"].includes(status);
+  callControls.hidden = !inCall;
   muteButton.classList.toggle("is-muted", muted);
   muteButton.title = muted ? "Unmute microphone" : "Mute microphone";
   muteButton.setAttribute("aria-label", muteButton.title);
-  enableAudioButton.hidden =
-    status !== "connected" || !detail.includes("Enable audio");
+  enableAudioButton.hidden = status !== "connected" || !detail.includes("Enable audio");
+
   if (roomId) roomCode.textContent = roomId;
   copyRoomButton.disabled = !roomId;
-  createRoomButton.disabled = callControls.hidden === false;
-  joinForm.querySelector("button").disabled = callControls.hidden === false;
+  createRoomButton.disabled = inCall;
+  joinForm.querySelector("button").disabled = inCall;
 }
 
 async function sendBackgroundMessage(message) {
-  const response = await chrome.runtime.sendMessage({
-    ...message,
-    target: "background",
-  });
-  if (!response?.ok)
-    throw new Error(
-      response?.error || "The extension could not complete that action.",
-    );
+  const res = await chrome.runtime.sendMessage({ ...message, target: "background" });
+  if (!res?.ok) throw new Error(res?.error || "The extension could not complete that action.");
 }
 
+function generate6CharCode() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => chars[b % chars.length]).join("");
+}
+
+/* ── mic permission (MUST be called inside a user-gesture handler) ── */
+async function requestMicPermission() {
+  // getUserMedia from a popup button click = Chrome's native permission dialog.
+  // We stop the stream immediately — we only need permission granted.
+  // The offscreen document opens its own stream for the actual call.
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  stream.getTracks().forEach(t => t.stop());
+}
+
+/* ── start call ─────────────────────────────────────── */
 async function startCall(roomId, role) {
   toast.textContent = "";
+  hideMicGuide();
+
   const serverUrl = serverUrlInput.value.trim();
   let server;
-  try {
-    server = new URL(serverUrl);
-  } catch {
-    throw new Error("Enter a valid signaling server URL.");
-  }
+  try { server = new URL(serverUrl); }
+  catch { toast.textContent = "Enter a valid signaling server URL."; return; }
+
   if (!["ws:", "wss:"].includes(server.protocol)) {
-    throw new Error("The signaling URL must start with ws:// or wss://.");
+    toast.textContent = "The URL must start with ws:// or wss://."; return;
   }
   if (server.protocol === "ws:" && !LOCAL_HOSTS.has(server.hostname)) {
-    throw new Error("Use WSS for remote signaling servers; WS is allowed only on localhost.");
+    toast.textContent = "Use WSS for remote servers; WS is only allowed on localhost."; return;
   }
+
+  // Optional host permission for non-localhost servers
   if (!LOCAL_HOSTS.has(server.hostname)) {
-    const permissionOrigin = `${server.protocol === "wss:" ? "https:" : "http:"}//${server.host}/*`;
-    const granted = await chrome.permissions.request({
-      origins: [permissionOrigin],
-    });
-    if (!granted)
-      throw new Error("Permission to connect to this signaling server was not granted.");
+    const origin = `${server.protocol === "wss:" ? "https:" : "http:"}//${server.host}/*`;
+    const ok = await chrome.permissions.request({ origins: [origin] });
+    if (!ok) { toast.textContent = "Permission for this server was not granted."; return; }
   }
-  await sendBackgroundMessage({ type: "START_CALL", roomId, role, serverUrl });
+
+  // ── Microphone permission ────────────────────────────
+  // Called here, inside the button click handler = user gesture.
+  // Chrome shows its native "Allow microphone?" dialog.
+  try {
+    await requestMicPermission();
+  } catch (err) {
+    // NotAllowedError → Chrome blocked or user dismissed the dialog.
+    // Show the step-by-step guide so the user knows how to fix it in extension settings.
+    lastCallParams = { roomId, role, serverUrl };
+    showMicGuide();
+    return;
+  }
+
+  // Mic granted — launch the call
+  lastCallParams = { roomId, role, serverUrl };
   roomCode.textContent = roomId;
-  setStatus({
-    status: "requesting-microphone",
-    detail: "Allow microphone access to join.",
-    roomId,
-  });
+  setStatus({ status: "requesting-microphone", detail: "Joining room…", roomId });
+
+  try {
+    await sendBackgroundMessage({ type: "START_CALL", roomId, role, serverUrl });
+  } catch (err) {
+    toast.textContent = err.message;
+    setStatus({ status: "idle" });
+    lastCallParams = null;
+  }
 }
 
-createRoomButton.addEventListener("click", async () => {
-  const randomBytes = crypto.getRandomValues(new Uint8Array(24));
-  const roomId = btoa(String.fromCharCode(...randomBytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-  try {
-    await startCall(roomId, "host");
-  } catch (error) {
-    toast.textContent = error.message;
-  }
+/* ── button handlers ────────────────────────────────── */
+createRoomButton.addEventListener("click", () => startCall(generate6CharCode(), "host"));
+
+joinForm.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const code = joinCodeInput.value.trim().toUpperCase();
+  if (code.length < 4) { toast.textContent = "Enter a valid room code."; return; }
+  startCall(code, "guest");
 });
 
-joinForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const roomId = joinCodeInput.value.trim();
+// "Done – Try again" button in the mic guide
+retryBtn.addEventListener("click", async () => {
+  if (!lastCallParams) { hideMicGuide(); return; }
+  const { roomId, role, serverUrl } = lastCallParams;
+  hideMicGuide();
+  toast.textContent = "";
+
+  // Try mic permission again — now it should succeed since the user allowed it in settings
   try {
-    await startCall(roomId, "guest");
-  } catch (error) {
-    toast.textContent = error.message;
+    await requestMicPermission();
+  } catch {
+    // Still blocked — show the guide again
+    showMicGuide();
+    toast.textContent = "Microphone still blocked. Please follow the steps above.";
+    return;
+  }
+
+  // Clean up any previous failed state
+  try { await sendBackgroundMessage({ type: "CALL_ACTION", action: "leave" }); } catch { /* ok */ }
+
+  roomCode.textContent = roomId;
+  setStatus({ status: "requesting-microphone", detail: "Joining room…", roomId });
+
+  try {
+    await sendBackgroundMessage({ type: "START_CALL", roomId, role, serverUrl });
+  } catch (err) {
+    toast.textContent = err.message;
+    setStatus({ status: "idle" });
   }
 });
 
 copyRoomButton.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(roomCode.textContent);
-    toast.textContent = "Room code copied.";
-  } catch {
-    toast.textContent = "Could not copy the room code.";
-  }
+    toast.textContent = "Room code copied!";
+    setTimeout(() => { if (toast.textContent === "Room code copied!") toast.textContent = ""; }, 2000);
+  } catch { toast.textContent = "Could not copy the room code."; }
 });
 
 muteButton.addEventListener("click", async () => {
-  try {
-    await sendBackgroundMessage({ type: "CALL_ACTION", action: "toggle-mute" });
-  } catch (error) {
-    toast.textContent = error.message;
-  }
+  try { await sendBackgroundMessage({ type: "CALL_ACTION", action: "toggle-mute" }); }
+  catch (err) { toast.textContent = err.message; }
 });
 
 leaveButton.addEventListener("click", async () => {
-  try {
-    await sendBackgroundMessage({ type: "CALL_ACTION", action: "leave" });
-  } catch (error) {
-    toast.textContent = error.message;
-  }
+  lastCallParams = null;
+  hideMicGuide();
+  try { await sendBackgroundMessage({ type: "CALL_ACTION", action: "leave" }); }
+  catch (err) { toast.textContent = err.message; }
 });
 
-enableAudioButton.addEventListener("click", async () => {
+enableAudioButton.addEventListener("click", () => {
   chrome.runtime.sendMessage({ target: "offscreen", type: "ENABLE_AUDIO" });
 });
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.target === "popup" && message.type === "CALL_STATUS") {
-    setStatus(message);
-  }
+/* ── receive status updates from offscreen ──────────── */
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.target !== "popup" || msg.type !== "CALL_STATUS") return;
+  if (msg.status === "ended" || msg.status === "idle") lastCallParams = null;
+  setStatus(msg);
 });
 
+/* ── init ───────────────────────────────────────────── */
 setStatus({});
-chrome.runtime
-  .sendMessage({ target: "background", type: "GET_CALL_STATUS" })
-  .catch(() => {});
+chrome.runtime.sendMessage({ target: "background", type: "GET_CALL_STATUS" }).catch(() => {});

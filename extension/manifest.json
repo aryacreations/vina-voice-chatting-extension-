@@ -3,7 +3,7 @@
   "name": "Voice Chat",
   "version": "1.0.0",
   "description": "Private one-to-one voice rooms while you browse.",
-  "permissions": ["offscreen"],
+  "permissions": ["offscreen", "tabs"],
   "host_permissions": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {

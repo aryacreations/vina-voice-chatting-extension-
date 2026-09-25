@@ -120,27 +120,15 @@ function send(socket, message) {
   }
 }
 
-function isValidSignal(type, payload, role) {
+function isValidSignal(type, payload) {
   if (!SIGNAL_TYPES.has(type) || !isRecord(payload)) {
     return false;
   }
 
-  if (type === "offer") {
+  if (type === "offer" || type === "answer") {
     return (
-      role === "host" &&
       hasOnlyKeys(payload, ["type", "sdp"]) &&
-      payload.type === "offer" &&
-      typeof payload.sdp === "string" &&
-      payload.sdp.length > 0 &&
-      payload.sdp.length <= MAX_SDP_LENGTH
-    );
-  }
-
-  if (type === "answer") {
-    return (
-      role === "guest" &&
-      hasOnlyKeys(payload, ["type", "sdp"]) &&
-      payload.type === "answer" &&
+      (payload.type === "offer" || payload.type === "answer") &&
       typeof payload.sdp === "string" &&
       payload.sdp.length > 0 &&
       payload.sdp.length <= MAX_SDP_LENGTH
@@ -172,6 +160,11 @@ function isValidSignal(type, payload, role) {
 
 function createSignalingServer(options = {}) {
   const config = readConfig(options.env || process.env);
+  const maxRoomParticipants = positiveInteger(
+    options.env?.MAX_ROOM_PARTICIPANTS || process.env.MAX_ROOM_PARTICIPANTS,
+    10,
+    100,
+  );
   const rooms = new Map();
   const clients = new Set();
   const httpServer = http.createServer((request, response) => {
@@ -213,6 +206,7 @@ function createSignalingServer(options = {}) {
     }
     clients.add(socket);
     socket.isAlive = true;
+    socket.peerId = crypto.randomBytes(8).toString("hex");
     socket.on("pong", () => {
       socket.isAlive = true;
     });
@@ -234,7 +228,13 @@ function createSignalingServer(options = {}) {
 
       if (
         !isRecord(message) ||
-        !hasOnlyKeys(message, ["type", "roomId", "payload"])
+        !hasOnlyKeys(message, [
+          "type",
+          "roomId",
+          "payload",
+          "targetPeerId",
+          "fromPeerId",
+        ])
       ) {
         send(socket, { type: "error", message: "Invalid signaling message." });
         return;
@@ -256,10 +256,10 @@ function createSignalingServer(options = {}) {
         }
 
         let room = rooms.get(message.roomId);
-        if (room?.length >= 2) {
+        if (room?.length >= maxRoomParticipants) {
           send(socket, {
             type: "error",
-            message: "That room already has two people.",
+            message: `That room is full (maximum ${maxRoomParticipants} participants).`,
           });
           return;
         }
@@ -278,17 +278,26 @@ function createSignalingServer(options = {}) {
 
         socket.roomId = message.roomId;
         socket.role = room.length === 0 ? "host" : "guest";
+        const existingPeers = room.map((peer) => peer.peerId);
         room.push(socket);
+
         send(socket, {
           type: "joined",
           roomId: socket.roomId,
           role: socket.role,
-          peerPresent: room.length === 2,
+          peerId: socket.peerId,
+          peers: existingPeers,
+          peerPresent: room.length >= 2,
           iceServers: createIceServers(config),
         });
 
-        if (room.length === 2) {
-          send(room[0], { type: "peer-joined" });
+        for (const peer of room) {
+          if (peer !== socket) {
+            send(peer, {
+              type: "peer-joined",
+              peerId: socket.peerId,
+            });
+          }
         }
         return;
       }
@@ -302,17 +311,31 @@ function createSignalingServer(options = {}) {
       }
 
       if (
-        !hasOnlyKeys(message, ["type", "payload"]) ||
-        !isValidSignal(message.type, message.payload, socket.role)
+        !isValidSignal(message.type, message.payload)
       ) {
         send(socket, { type: "error", message: "Invalid signaling message." });
         return;
       }
 
       const room = rooms.get(socket.roomId) || [];
-      for (const peer of room) {
-        if (peer !== socket) {
-          send(peer, { type: message.type, payload: message.payload });
+      if (message.targetPeerId) {
+        const target = room.find((peer) => peer.peerId === message.targetPeerId);
+        if (target && target !== socket) {
+          send(target, {
+            type: message.type,
+            payload: message.payload,
+            fromPeerId: socket.peerId,
+          });
+        }
+      } else {
+        for (const peer of room) {
+          if (peer !== socket) {
+            send(peer, {
+              type: message.type,
+              payload: message.payload,
+              fromPeerId: socket.peerId,
+            });
+          }
         }
       }
     });
@@ -324,8 +347,14 @@ function createSignalingServer(options = {}) {
       const room = rooms.get(socket.roomId) || [];
       for (const peer of room) {
         if (peer !== socket) {
-          peer.role = "host";
-          send(peer, { type: "peer-left", role: peer.role });
+          if (room[0] === socket && room[1] === peer) {
+            peer.role = "host";
+          }
+          send(peer, {
+            type: "peer-left",
+            peerId: socket.peerId,
+            role: peer.role,
+          });
         }
       }
 
@@ -373,6 +402,26 @@ if (require.main === module) {
       `Voice chat signaling server listening on ${host}:${port}`,
     );
   });
+
+  // ── Keep-alive self-ping ────────────────────────────────────────────────────
+  // Set KEEPALIVE_URL=https://your-app.onrender.com/health to prevent Render's
+  // free-tier service from sleeping after 15 minutes of inactivity.
+  // The server pings itself every 14 minutes using only Node built-ins.
+  const KEEPALIVE_URL = process.env.KEEPALIVE_URL;
+  if (KEEPALIVE_URL) {
+    const { get } = require(KEEPALIVE_URL.startsWith("https") ? "node:https" : "node:http");
+    const FOURTEEN_MINUTES = 14 * 60 * 1000;
+    const keepAliveTimer = setInterval(() => {
+      get(KEEPALIVE_URL, (res) => {
+        console.log(`[keepalive] ${new Date().toISOString()} → ${res.statusCode} ${KEEPALIVE_URL}`);
+      }).on("error", (err) => {
+        console.error(`[keepalive] ping failed: ${err.message}`);
+      });
+    }, FOURTEEN_MINUTES);
+    keepAliveTimer.unref(); // Don't block process exit
+    console.log(`[keepalive] Self-ping every 14 min → ${KEEPALIVE_URL}`);
+  }
+  // ───────────────────────────────────────────────────────────────────────────
 
   let shuttingDown = false;
   for (const signal of ["SIGINT", "SIGTERM"]) {

@@ -47,44 +47,51 @@ test("joins two peers and relays offers only to the other peer", async (context)
   });
 
   host.send(JSON.stringify({ type: "join", roomId: "test-room" }));
-  assert.deepEqual(await nextMessage(host), {
-    type: "joined",
-    roomId: "test-room",
-    role: "host",
-    peerPresent: false,
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  });
+  const hostJoined = await nextMessage(host);
+  assert.equal(hostJoined.type, "joined");
+  assert.equal(hostJoined.roomId, "test-room");
+  assert.equal(hostJoined.role, "host");
+  assert.equal(hostJoined.peerPresent, false);
+  assert.ok(hostJoined.peerId);
+  assert.deepEqual(hostJoined.peers, []);
 
   guest.send(JSON.stringify({ type: "join", roomId: "test-room" }));
-  assert.deepEqual(await nextMessage(guest), {
-    type: "joined",
-    roomId: "test-room",
-    role: "guest",
-    peerPresent: true,
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  });
-  assert.deepEqual(await nextMessage(host), { type: "peer-joined" });
+  const guestJoined = await nextMessage(guest);
+  assert.equal(guestJoined.type, "joined");
+  assert.equal(guestJoined.roomId, "test-room");
+  assert.equal(guestJoined.role, "guest");
+  assert.equal(guestJoined.peerPresent, true);
+  assert.ok(guestJoined.peerId);
+  assert.deepEqual(guestJoined.peers, [hostJoined.peerId]);
+
+  const hostPeerJoined = await nextMessage(host);
+  assert.equal(hostPeerJoined.type, "peer-joined");
+  assert.equal(hostPeerJoined.peerId, guestJoined.peerId);
 
   const offer = { type: "offer", sdp: "test-sdp" };
   const relayedOffer = nextMessage(guest);
   host.send(JSON.stringify({ type: "offer", payload: offer }));
-  assert.deepEqual(await relayedOffer, { type: "offer", payload: offer });
+  const receivedOffer = await relayedOffer;
+  assert.equal(receivedOffer.type, "offer");
+  assert.deepEqual(receivedOffer.payload, offer);
 });
 
-test("rejects a third participant in a full room", async (context) => {
-  const peers = await Promise.all([connect(), connect(), connect()]);
+test("rejects an 11th participant in a full room (10 participant limit)", async (context) => {
+  const peers = await Promise.all(
+    Array.from({ length: 11 }, () => connect())
+  );
   context.after(() => peers.forEach((peer) => peer.close()));
 
-  for (const peer of peers.slice(0, 2)) {
-    peer.send(JSON.stringify({ type: "join", roomId: "full-room" }));
-    await nextMessage(peer);
+  for (let i = 0; i < 10; i++) {
+    peers[i].send(JSON.stringify({ type: "join", roomId: "full-room" }));
+    const joinedMsg = await nextMessage(peers[i]);
+    assert.equal(joinedMsg.type, "joined");
   }
-  await nextMessage(peers[0]);
 
-  peers[2].send(JSON.stringify({ type: "join", roomId: "full-room" }));
-  const response = await nextMessage(peers[2]);
+  peers[10].send(JSON.stringify({ type: "join", roomId: "full-room" }));
+  const response = await nextMessage(peers[10]);
   assert.equal(response.type, "error");
-  assert.match(response.message, /two people/);
+  assert.match(response.message, /full|maximum 10 participants/);
 });
 
 test("enforces the configured room limit", async (context) => {
@@ -120,28 +127,27 @@ test("promotes the remaining participant when the room creator leaves", async (c
   context.after(() => guest.close());
 
   host.send(JSON.stringify({ type: "join", roomId: "handoff-room" }));
-  await nextMessage(host);
+  const hostJoined = await nextMessage(host);
   guest.send(JSON.stringify({ type: "join", roomId: "handoff-room" }));
   await nextMessage(guest);
   await nextMessage(host);
 
   host.close();
-  assert.deepEqual(await nextMessage(guest), {
-    type: "peer-left",
-    role: "host",
-  });
+  const peerLeftMsg = await nextMessage(guest);
+  assert.equal(peerLeftMsg.type, "peer-left");
+  assert.equal(peerLeftMsg.role, "host");
+  assert.equal(peerLeftMsg.peerId, hostJoined.peerId);
 
   const replacement = await connect();
   context.after(() => replacement.close());
   replacement.send(JSON.stringify({ type: "join", roomId: "handoff-room" }));
-  assert.deepEqual(await nextMessage(replacement), {
-    type: "joined",
-    roomId: "handoff-room",
-    role: "guest",
-    peerPresent: true,
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  });
-  assert.deepEqual(await nextMessage(guest), { type: "peer-joined" });
+  const replacementJoined = await nextMessage(replacement);
+  assert.equal(replacementJoined.type, "joined");
+  assert.equal(replacementJoined.role, "guest");
+
+  const guestPeerJoined = await nextMessage(guest);
+  assert.equal(guestPeerJoined.type, "peer-joined");
+  assert.equal(guestPeerJoined.peerId, replacementJoined.peerId);
 });
 
 test("rejects JSON null without crashing the signaling server", async (context) => {

@@ -17,58 +17,80 @@
         <span class="signal" id="signal" aria-label="Call status"></span>
       </header>
 
-      <section class="connection" aria-labelledby="connection-heading">
-        <div class="section-heading">
-          <h2 id="connection-heading">Signaling server</h2>
-          <span class="local-tag">LOCAL</span>
+      <!-- Shown only when Chrome blocks mic permission -->
+      <section class="mic-guide" id="mic-guide" hidden>
+        <div class="mic-guide-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path></svg>
         </div>
-        <label class="sr-only" for="server-url">Signaling WebSocket URL</label>
-        <input id="server-url" type="url" value="ws://localhost:3000/signal" spellcheck="false" autocomplete="url">
-      </section>
-
-      <section class="room" aria-labelledby="room-heading">
-        <div class="section-heading">
-          <h2 id="room-heading">Your room</h2>
-          <button class="icon-button" id="copy-room" type="button" title="Copy room code" aria-label="Copy room code" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"></path></svg>
-          </button>
-        </div>
-        <div class="room-code" id="room-code">------</div>
-        <button class="button button-primary" id="create-room" type="button">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
-          Create room
+        <p class="mic-guide-title">Microphone blocked</p>
+        <p class="mic-guide-sub">Chrome requires a one-time setup for extensions. Takes 10 seconds:</p>
+        <ol class="mic-steps">
+          <li><span class="step-num">1</span><span>Right-click the <strong>Voice Chat</strong> icon in the Chrome toolbar</span></li>
+          <li><span class="step-num">2</span><span>Click <strong>Manage extension</strong></span></li>
+          <li><span class="step-num">3</span><span>Scroll to <strong>Site Settings → Microphone</strong></span></li>
+          <li><span class="step-num">4</span><span>Set it to <strong>Allow</strong>, then come back</span></li>
+        </ol>
+        <button id="retry-after-settings" class="button button-primary" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          Done — Try again
         </button>
       </section>
 
-      <section class="join" aria-labelledby="join-heading">
-        <h2 id="join-heading">Join a room</h2>
-        <form id="join-form">
-          <label class="sr-only" for="join-code">Room code</label>
-          <input id="join-code" type="text" placeholder="Enter room code" minlength="4" maxlength="64" pattern="[A-Za-z0-9_-]{4,64}" autocomplete="off" required>
-          <button class="button button-secondary" type="submit">Join</button>
-        </form>
-      </section>
+      <!-- Main UI (hidden while mic guide is shown) -->
+      <div id="main-ui">
+        <section class="connection" aria-labelledby="connection-heading">
+          <div class="section-heading">
+            <h2 id="connection-heading">Signaling server</h2>
+            <span class="local-tag">LOCAL</span>
+          </div>
+          <label class="sr-only" for="server-url">Signaling WebSocket URL</label>
+          <input id="server-url" type="url" value="ws://localhost:3000/signal" spellcheck="false" autocomplete="url">
+        </section>
 
-      <section class="call-panel" aria-live="polite">
-        <div class="status-copy">
-          <span class="status-label">CALL STATUS</span>
-          <p id="status-text">Ready when you are</p>
-        </div>
-        <p id="status-detail" class="status-detail"></p>
-        <div id="call-controls" class="call-controls" hidden>
-          <button class="icon-button control-button" id="mute-button" type="button" title="Mute microphone" aria-label="Mute microphone">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path></svg>
+        <section class="room" aria-labelledby="room-heading">
+          <div class="section-heading">
+            <h2 id="room-heading">Your room</h2>
+            <button class="icon-button" id="copy-room" type="button" title="Copy room code" aria-label="Copy room code" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"></path></svg>
+            </button>
+          </div>
+          <div class="room-code" id="room-code">------</div>
+          <button class="button button-primary" id="create-room" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+            Create room
           </button>
-          <button class="button button-leave" id="leave-button" type="button">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 16 4-3 5-4-4H9l-3 3z"></path></svg>
-            Leave call
-          </button>
-        </div>
-        <button id="enable-audio" class="text-button" type="button" hidden>Enable audio</button>
-        <p id="toast" class="toast" role="status"></p>
-      </section>
+        </section>
 
-      <footer>One-to-one encrypted WebRTC audio</footer>
+        <section class="join" aria-labelledby="join-heading">
+          <h2 id="join-heading">Join a room</h2>
+          <form id="join-form">
+            <label class="sr-only" for="join-code">Room code</label>
+            <input id="join-code" type="text" placeholder="Enter 6-character code" minlength="4" maxlength="64" pattern="[A-Za-z0-9_-]{4,64}" autocomplete="off" required spellcheck="false">
+            <button class="button button-secondary" type="submit">Join</button>
+          </form>
+        </section>
+
+        <section class="call-panel" aria-live="polite">
+          <div class="status-copy">
+            <span class="status-label">CALL STATUS</span>
+            <p id="status-text">Ready when you are</p>
+          </div>
+          <p id="status-detail" class="status-detail"></p>
+          <div id="call-controls" class="call-controls" hidden>
+            <button class="icon-button control-button" id="mute-button" type="button" title="Mute microphone" aria-label="Mute microphone">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path></svg>
+            </button>
+            <button class="button button-leave" id="leave-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 16 4-3 5-4-4H9l-3 3z"></path></svg>
+              Leave call
+            </button>
+          </div>
+          <button id="enable-audio" class="text-button" type="button" hidden>Enable audio</button>
+          <p id="toast" class="toast" role="status"></p>
+        </section>
+
+        <footer>Multi-peer encrypted WebRTC audio · up to 10 participants</footer>
+      </div>
     </main>
     <script src="popup.js"></script>
   </body>

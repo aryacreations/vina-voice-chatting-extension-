@@ -2,15 +2,17 @@ const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{4,64}$/;
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 let socket;
-let peerConnection;
 let localStream;
 let activeRoomId;
 let callStatus = "idle";
-let pendingCandidates = [];
-let remoteAudio;
+let myPeerId = null;
 let iceServers = [];
 let activeRole;
 let callGeneration = 0;
+
+const peerConnections = new Map();
+const remoteAudios = new Map();
+const pendingCandidates = new Map();
 
 function publishStatus(status, detail = "") {
   callStatus = status;
@@ -27,53 +29,95 @@ function publishStatus(status, detail = "") {
     .catch(() => {});
 }
 
-function sendSignal(type, payload) {
+function sendSignal(type, payload, targetPeerId) {
   if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type, payload }));
+    socket.send(JSON.stringify({ type, payload, targetPeerId }));
   }
 }
 
-async function flushIceCandidates(connection, generation) {
+async function getOrCreateLocalStream() {
+  if (!localStream) {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+  }
+  return localStream;
+}
+
+function updateOverallStatus() {
+  const activePeersCount = peerConnections.size;
+  if (activePeersCount === 0) {
+    publishStatus(
+      "waiting",
+      activeRole === "host"
+        ? "Room ready. Waiting for people to join."
+        : "Joined room. Waiting for participants.",
+    );
+    return;
+  }
+
+  let connectedCount = 0;
+  for (const pc of peerConnections.values()) {
+    if (pc.connectionState === "connected") {
+      connectedCount++;
+    }
+  }
+
+  if (connectedCount > 0) {
+    publishStatus(
+      "connected",
+      `Voice connected (${connectedCount + 1} in room)`,
+    );
+  } else {
+    publishStatus("connecting", "Connecting audio...");
+  }
+}
+
+async function flushIceCandidates(targetPeerId, connection, generation) {
   if (!connection?.remoteDescription) return;
-  const candidates = pendingCandidates;
-  pendingCandidates = [];
+  const candidates = pendingCandidates.get(targetPeerId) || [];
+  pendingCandidates.delete(targetPeerId);
   for (const candidate of candidates) {
     if (generation !== callGeneration) return;
     await connection.addIceCandidate(candidate);
   }
 }
 
-async function createPeerConnection(generation = callGeneration) {
-  const connection = new RTCPeerConnection({ iceServers });
-  peerConnection = connection;
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-    video: false,
-  });
-  if (generation !== callGeneration) {
-    stream.getTracks().forEach((track) => track.stop());
-    connection.close();
-    return;
+async function getOrCreatePeerConnection(targetPeerId, generation = callGeneration) {
+  if (peerConnections.has(targetPeerId)) {
+    return peerConnections.get(targetPeerId);
   }
-  localStream = stream;
+
+  const connection = new RTCPeerConnection({ iceServers });
+  peerConnections.set(targetPeerId, connection);
+
+  const stream = await getOrCreateLocalStream();
+  if (generation !== callGeneration) {
+    connection.close();
+    peerConnections.delete(targetPeerId);
+    return null;
+  }
 
   for (const track of stream.getTracks()) {
     connection.addTrack(track, stream);
   }
 
   connection.ontrack = (event) => {
-    if (generation !== callGeneration || peerConnection !== connection) return;
-    if (!remoteAudio) {
-      remoteAudio = new Audio();
-      remoteAudio.autoplay = true;
-      remoteAudio.playsInline = true;
+    if (generation !== callGeneration) return;
+    let audioEl = remoteAudios.get(targetPeerId);
+    if (!audioEl) {
+      audioEl = new Audio();
+      audioEl.autoplay = true;
+      audioEl.playsInline = true;
+      remoteAudios.set(targetPeerId, audioEl);
     }
-    remoteAudio.srcObject = event.streams[0];
-    remoteAudio
+    audioEl.srcObject = event.streams[0];
+    audioEl
       .play()
       .catch(() =>
         publishStatus(
@@ -84,30 +128,37 @@ async function createPeerConnection(generation = callGeneration) {
   };
 
   connection.onicecandidate = ({ candidate }) => {
-    if (
-      candidate &&
-      generation === callGeneration &&
-      peerConnection === connection
-    ) {
-      sendSignal("ice-candidate", candidate.toJSON());
+    if (candidate && generation === callGeneration) {
+      sendSignal("ice-candidate", candidate.toJSON(), targetPeerId);
     }
   };
 
   connection.onconnectionstatechange = () => {
-    if (generation !== callGeneration || peerConnection !== connection) return;
-    if (connection.connectionState === "connected")
-      publishStatus("connected");
-    if (connection.connectionState === "disconnected")
-      publishStatus("reconnecting", "Connection interrupted.");
+    if (generation !== callGeneration) return;
     if (connection.connectionState === "failed") {
-      endCall().then(() =>
-        publishStatus(
-          "error",
-          "WebRTC could not find a route. A TURN server may be required.",
-        ),
-      );
+      closePeer(targetPeerId);
     }
+    updateOverallStatus();
   };
+
+  return connection;
+}
+
+function closePeer(targetPeerId) {
+  const pc = peerConnections.get(targetPeerId);
+  if (pc) {
+    pc.ontrack = null;
+    pc.onicecandidate = null;
+    pc.close();
+    peerConnections.delete(targetPeerId);
+  }
+  const audio = remoteAudios.get(targetPeerId);
+  if (audio) {
+    audio.pause();
+    audio.srcObject = null;
+    remoteAudios.delete(targetPeerId);
+  }
+  pendingCandidates.delete(targetPeerId);
 }
 
 async function startCall({ roomId, serverUrl, role }) {
@@ -144,7 +195,7 @@ async function startCall({ roomId, serverUrl, role }) {
   activeRoomId = roomId;
   activeRole = role;
   const generation = ++callGeneration;
-  pendingCandidates = [];
+  pendingCandidates.clear();
   publishStatus("connecting", "Joining the signaling server.");
 
   try {
@@ -203,71 +254,71 @@ async function handleServerMessage(data, generation) {
   }
 
   if (message.type === "joined") {
-    if (message.role !== activeRole)
-      throw new Error(
-        "That room already exists. Create a different room or join the existing one.",
-      );
     if (!Array.isArray(message.iceServers) || message.iceServers.length === 0) {
       throw new Error("The signaling server did not provide ICE configuration.");
     }
     iceServers = message.iceServers;
-    publishStatus("requesting-microphone", "Allow microphone access to join.");
-    await createPeerConnection(generation);
+    myPeerId = message.peerId;
+
+    publishStatus("requesting-microphone", "Accessing microphone...");
+    await getOrCreateLocalStream();
     if (generation !== callGeneration) return;
-    publishStatus(
-      "waiting",
-      activeRole === "host"
-        ? "Room ready. Waiting for someone to join."
-        : "Joined room. Connecting...",
-    );
-  } else if (message.type === "peer-joined" && activeRole === "host") {
-    const connection = peerConnection;
-    const offer = await connection.createOffer();
+
+    const existingPeers = Array.isArray(message.peers) ? message.peers : [];
+    for (const peerId of existingPeers) {
+      const pc = await getOrCreatePeerConnection(peerId, generation);
+      if (!pc || generation !== callGeneration) return;
+      const offer = await pc.createOffer();
+      if (generation !== callGeneration) return;
+      await pc.setLocalDescription(offer);
+      if (generation !== callGeneration) return;
+      sendSignal("offer", pc.localDescription.toJSON(), peerId);
+    }
+
+    updateOverallStatus();
+  } else if (message.type === "peer-joined") {
+    const peerId = message.peerId || "default";
+    await getOrCreatePeerConnection(peerId, generation);
+    updateOverallStatus();
+  } else if (message.type === "offer") {
+    const fromPeerId = message.fromPeerId || "default";
+    const pc = await getOrCreatePeerConnection(fromPeerId, generation);
+    if (!pc || generation !== callGeneration) return;
+    await pc.setRemoteDescription(message.payload);
     if (generation !== callGeneration) return;
-    await connection.setLocalDescription(offer);
+    await flushIceCandidates(fromPeerId, pc, generation);
     if (generation !== callGeneration) return;
-    sendSignal("offer", peerConnection.localDescription.toJSON());
-    publishStatus("connecting");
-  } else if (message.type === "offer" && activeRole === "guest") {
-    const connection = peerConnection;
-    await connection.setRemoteDescription(message.payload);
+    const answer = await pc.createAnswer();
     if (generation !== callGeneration) return;
-    await flushIceCandidates(connection, generation);
+    await pc.setLocalDescription(answer);
     if (generation !== callGeneration) return;
-    const answer = await connection.createAnswer();
-    if (generation !== callGeneration) return;
-    await connection.setLocalDescription(answer);
-    if (generation !== callGeneration) return;
-    sendSignal("answer", connection.localDescription.toJSON());
-    publishStatus("connecting");
-  } else if (message.type === "answer" && activeRole === "host") {
-    const connection = peerConnection;
-    await connection.setRemoteDescription(message.payload);
-    if (generation !== callGeneration) return;
-    await flushIceCandidates(connection, generation);
-    if (generation !== callGeneration) return;
-    publishStatus("connecting");
+    sendSignal("answer", pc.localDescription.toJSON(), fromPeerId);
+    updateOverallStatus();
+  } else if (message.type === "answer") {
+    const fromPeerId = message.fromPeerId || "default";
+    const pc = peerConnections.get(fromPeerId);
+    if (pc) {
+      await pc.setRemoteDescription(message.payload);
+      if (generation !== callGeneration) return;
+      await flushIceCandidates(fromPeerId, pc, generation);
+    }
+    updateOverallStatus();
   } else if (message.type === "ice-candidate") {
-    const connection = peerConnection;
-    if (connection?.remoteDescription) {
-      await connection.addIceCandidate(message.payload);
+    const fromPeerId = message.fromPeerId || "default";
+    const pc = peerConnections.get(fromPeerId);
+    if (pc?.remoteDescription) {
+      await pc.addIceCandidate(message.payload);
     } else {
-      pendingCandidates.push(message.payload);
+      if (!pendingCandidates.has(fromPeerId)) {
+        pendingCandidates.set(fromPeerId, []);
+      }
+      pendingCandidates.get(fromPeerId).push(message.payload);
     }
   } else if (message.type === "peer-left") {
-    activeRole = message.role || activeRole;
-    publishStatus(
-      "waiting",
-      "The other person left. Waiting for them to rejoin.",
-    );
-    peerConnection?.close();
-    peerConnection = null;
-    localStream?.getTracks().forEach((track) => track.stop());
-    localStream = null;
-    if (remoteAudio) remoteAudio.srcObject = null;
-    pendingCandidates = [];
-    await createPeerConnection(generation);
-    if (generation !== callGeneration) return;
+    const peerId = message.peerId || "default";
+    if (message.role) activeRole = message.role;
+    closePeer(peerId);
+    updateOverallStatus();
   } else if (message.type === "error") {
     throw new Error(message.message);
   }
@@ -279,21 +330,18 @@ async function endCall() {
     socket.close();
   }
   socket = null;
-  if (peerConnection) {
-    peerConnection.ontrack = null;
-    peerConnection.close();
+
+  for (const targetPeerId of Array.from(peerConnections.keys())) {
+    closePeer(targetPeerId);
   }
-  peerConnection = null;
+
   localStream?.getTracks().forEach((track) => track.stop());
   localStream = null;
-  if (remoteAudio) {
-    remoteAudio.pause();
-    remoteAudio.srcObject = null;
-  }
-  pendingCandidates = [];
+  pendingCandidates.clear();
   iceServers = [];
   activeRoomId = null;
   activeRole = null;
+  myPeerId = null;
   publishStatus("ended");
 }
 
@@ -318,12 +366,10 @@ chrome.runtime.onMessage.addListener((message) => {
     publishStatus(callStatus);
   } else if (message.type === "STATUS_QUERY") {
     publishStatus(callStatus);
-  } else if (message.type === "ENABLE_AUDIO" && remoteAudio) {
-    remoteAudio
-      .play()
-      .then(() => publishStatus(callStatus))
-      .catch(() =>
-        publishStatus(callStatus, "Audio playback is blocked by the browser."),
-      );
+  } else if (message.type === "ENABLE_AUDIO") {
+    for (const audioEl of remoteAudios.values()) {
+      audioEl.play().catch(() => {});
+    }
+    publishStatus(callStatus);
   }
 });

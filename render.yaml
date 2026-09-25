@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: vina-voice-chat
+    runtime: node
+    rootDir: server
+    buildCommand: npm ci
+    startCommand: node src/server.js
+    # Render sets PORT automatically — the server already reads process.env.PORT
+    envVars:
+      - key: NODE_ENV
+        value: development   # No TURN/origin requirements in development
+
+      # ── Keep-alive (prevents the free tier sleeping after 15 min) ──────────
+      # After deploying, replace YOUR-APP-NAME with the real Render subdomain.
+      # The server will ping this URL every 14 minutes to stay awake.
+      - key: KEEPALIVE_URL
+        value: https://YOUR-APP-NAME.onrender.com/health
+
+      # Optional: restrict which Chrome extension can connect (fill in after
+      # loading the unpacked extension and noting its ID from chrome://extensions)
+      # - key: ALLOWED_ORIGINS
+      #   value: chrome-extension://YOUR_EXTENSION_ID_HERE
+
+      # Optional: raise limits for busier use
+      # - key: MAX_ROOMS
+      #   value: "5000"
+      # - key: MAX_CONNECTIONS
+      #   value: "1000"
