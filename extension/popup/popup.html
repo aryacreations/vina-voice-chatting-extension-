@@ -14,6 +14,13 @@
           <p class="eyebrow">PRIVATE AUDIO</p>
           <h1>Voice Chat</h1>
         </div>
+        <div class="user-id-badge" title="Your Caller ID">
+          <span class="user-id-label">YOUR ID</span>
+          <button class="user-id-value" id="user-id" type="button"
+            aria-label="Copy your caller ID" title="Click to copy">
+            Loading…
+          </button>
+        </div>
         <span class="signal" id="signal" aria-label="Call status"></span>
       </header>
 
@@ -41,10 +48,19 @@
         <section class="connection" aria-labelledby="connection-heading">
           <div class="section-heading">
             <h2 id="connection-heading">Signaling server</h2>
-            <span class="local-tag">LOCAL</span>
+            <span class="local-tag live-tag" id="server-tag">REMOTE</span>
           </div>
           <label class="sr-only" for="server-url">Signaling WebSocket URL</label>
-          <input id="server-url" type="url" value="ws://localhost:3000/signal" spellcheck="false" autocomplete="url">
+          <input id="server-url" type="url" value="wss://vina-voice-chatting-extension.onrender.com/signal" spellcheck="false" autocomplete="url">
+        </section>
+
+        <section class="connection" aria-labelledby="display-name-heading">
+          <div class="section-heading">
+            <h2 id="display-name-heading">Your name</h2>
+            <span class="local-tag" style="letter-spacing:.02em">SHOWN TO OTHERS</span>
+          </div>
+          <label class="sr-only" for="display-name">Display name</label>
+          <input id="display-name" type="text" placeholder="e.g. Sam" maxlength="50" autocomplete="name" spellcheck="false">
         </section>
 
         <section class="room" aria-labelledby="room-heading">
@@ -87,6 +103,15 @@
           </div>
           <button id="enable-audio" class="text-button" type="button" hidden>Enable audio</button>
           <p id="toast" class="toast" role="status"></p>
+        </section>
+
+        <!-- Participant roster — shown during an active/waiting call -->
+        <section id="participants-section" class="participants-section" hidden>
+          <div class="section-heading">
+            <h2 id="participants-heading">Participants</h2>
+            <span id="participants-count" class="local-tag">0</span>
+          </div>
+          <ul id="participants-list" class="participants-list" aria-labelledby="participants-heading" aria-live="polite"></ul>
         </section>
 
         <footer>Multi-peer encrypted WebRTC audio · up to 10 participants</footer>

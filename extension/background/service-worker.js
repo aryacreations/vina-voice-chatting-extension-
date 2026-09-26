@@ -1,6 +1,33 @@
 const OFFSCREEN_URL = "offscreen/offscreen.html";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+// Hosts already declared in manifest host_permissions — no runtime permission prompt needed
+const MANIFEST_HOSTS = new Set([
+  "localhost",
+  "127.0.0.1",
+  "[::1]",
+  "vina-voice-chatting-extension.onrender.com",
+]);
 let creatingOffscreen;
+
+/* ── User ID ─────────────────────────────────────────────────────────
+ * Generated once on install and persisted in chrome.storage.local.
+ * Format: VINA-XXXXXXXX  (8 uppercase alphanumeric chars)
+ * Used as caller-id, receiver-id, and mute-identity across all peers.
+ * ─────────────────────────────────────────────────────────────────── */
+function generateUserId() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  const suffix = Array.from(bytes, b => chars[b % chars.length]).join("");
+  return `VINA-${suffix}`;
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
+  const { userId } = await chrome.storage.local.get("userId");
+  if (!userId) {
+    await chrome.storage.local.set({ userId: generateUserId() });
+  }
+});
 
 async function ensureOffscreenDocument() {
   const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_URL);
@@ -41,7 +68,7 @@ async function requestServerPermission(serverUrl) {
   }
 
   const permissionOrigin = `${server.protocol === "wss:" ? "https:" : "http:"}//${server.host}/*`;
-  const allowedByManifest = LOCAL_HOSTS.has(server.hostname);
+  const allowedByManifest = MANIFEST_HOSTS.has(server.hostname);
   if (allowedByManifest) return;
 
   const hasPermission = await chrome.permissions.contains({
@@ -55,6 +82,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target !== "background") return;
 
   (async () => {
+    if (message.type === "GET_USER_ID") {
+      const { userId } = await chrome.storage.local.get("userId");
+      // Lazily create the ID if it was somehow missing (e.g. storage cleared)
+      if (!userId) {
+        const newId = generateUserId();
+        await chrome.storage.local.set({ userId: newId });
+        sendResponse({ ok: true, userId: newId });
+      } else {
+        sendResponse({ ok: true, userId });
+      }
+      return;
+    }
+
     if (message.type === "START_CALL") {
       await requestServerPermission(message.serverUrl);
       await ensureOffscreenDocument();

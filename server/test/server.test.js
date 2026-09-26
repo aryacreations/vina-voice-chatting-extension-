@@ -62,7 +62,11 @@ test("joins two peers and relays offers only to the other peer", async (context)
   assert.equal(guestJoined.role, "guest");
   assert.equal(guestJoined.peerPresent, true);
   assert.ok(guestJoined.peerId);
-  assert.deepEqual(guestJoined.peers, [hostJoined.peerId]);
+  assert.deepEqual(guestJoined.peers, [{
+    peerId: hostJoined.peerId,
+    userId: null,
+    displayName: null,
+  }]);
 
   const hostPeerJoined = await nextMessage(host);
   assert.equal(hostPeerJoined.type, "peer-joined");

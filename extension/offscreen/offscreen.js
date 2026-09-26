@@ -6,6 +6,7 @@ let localStream;
 let activeRoomId;
 let callStatus = "idle";
 let myPeerId = null;
+let myUserId = null;   // persistent caller/receiver ID loaded from storage
 let iceServers = [];
 let activeRole;
 let callGeneration = 0;
@@ -13,6 +14,54 @@ let callGeneration = 0;
 const peerConnections = new Map();
 const remoteAudios = new Map();
 const pendingCandidates = new Map();
+
+// peerId → persistent userId (VINA-XXXXXXXX) received from the server
+const peerUserIds = new Map();
+// peerId → human-readable display name chosen by the user
+const peerDisplayNames = new Map();
+// peerId → RTCDataChannel for peer-to-peer control sync
+const peerDataChannels = new Map();
+// peerId → remote peer muted boolean
+const peerMutedStates = new Map();
+// peerIds currently detected as speaking (above VAD threshold)
+const speakingPeers = new Set();
+// peerId → { analyser, source, intervalId } for VAD cleanup
+const vadHandles = new Map();
+// Shared AudioContext for VAD (created lazily once)
+let audioCtx = null;
+// Our own display name for this call
+let myDisplayName = null;
+
+/* ── VAD threshold ──────────────────────────────────────────────────────
+ * RMS energy above this value (0-255 scale from AnalyserNode) = speaking.
+ * 4.5 is sensitive enough for normal/quiet speech while filtering silence.
+ * ─────────────────────────────────────────────────────────────────────── */
+const VAD_THRESHOLD = 4.5;
+const VAD_POLL_MS   = 100;
+const VAD_HANGOVER_MS = 350;
+
+function buildPeerList() {
+  const isMuted = localStream?.getAudioTracks().every((t) => !t.enabled) ?? false;
+  const list = [{
+    peerId: myPeerId,
+    userId: myUserId,
+    displayName: myDisplayName,
+    muted: isMuted,
+    speaking: !isMuted && speakingPeers.has("__local__"),
+    isLocal: true,
+  }];
+  for (const peerId of peerConnections.keys()) {
+    list.push({
+      peerId,
+      userId: peerUserIds.get(peerId) || null,
+      displayName: peerDisplayNames.get(peerId) || null,
+      muted: peerMutedStates.get(peerId) ?? false,
+      speaking: speakingPeers.has(peerId),
+      isLocal: false,
+    });
+  }
+  return list;
+}
 
 function publishStatus(status, detail = "") {
   callStatus = status;
@@ -23,8 +72,10 @@ function publishStatus(status, detail = "") {
       status,
       detail,
       roomId: activeRoomId,
+      userId: myUserId,
       muted:
         localStream?.getAudioTracks().every((track) => !track.enabled) ?? false,
+      peers: buildPeerList(),
     })
     .catch(() => {});
 }
@@ -45,6 +96,8 @@ async function getOrCreateLocalStream() {
       },
       video: false,
     });
+    // Start local VAD so speaking state triggers for the user speaking
+    startVad("__local__", localStream);
   }
   return localStream;
 }
@@ -96,6 +149,25 @@ async function getOrCreatePeerConnection(targetPeerId, generation = callGenerati
   const connection = new RTCPeerConnection({ iceServers });
   peerConnections.set(targetPeerId, connection);
 
+  // Negotiated data channel for peer-to-peer mute state sync
+  try {
+    const dataChannel = connection.createDataChannel("vina-control", { negotiated: true, id: 0 });
+    peerDataChannels.set(targetPeerId, dataChannel);
+    dataChannel.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "mute-state") {
+          peerMutedStates.set(targetPeerId, !!msg.muted);
+          publishStatus(callStatus);
+        }
+      } catch {}
+    };
+    dataChannel.onopen = () => {
+      const isMuted = localStream?.getAudioTracks().every((t) => !t.enabled) ?? false;
+      try { dataChannel.send(JSON.stringify({ type: "mute-state", muted: isMuted })); } catch {}
+    };
+  } catch {}
+
   const stream = await getOrCreateLocalStream();
   if (generation !== callGeneration) {
     connection.close();
@@ -109,6 +181,7 @@ async function getOrCreatePeerConnection(targetPeerId, generation = callGenerati
 
   connection.ontrack = (event) => {
     if (generation !== callGeneration) return;
+    const remoteStream = event.streams[0];
     let audioEl = remoteAudios.get(targetPeerId);
     if (!audioEl) {
       audioEl = new Audio();
@@ -116,15 +189,17 @@ async function getOrCreatePeerConnection(targetPeerId, generation = callGenerati
       audioEl.playsInline = true;
       remoteAudios.set(targetPeerId, audioEl);
     }
-    audioEl.srcObject = event.streams[0];
+    audioEl.srcObject = remoteStream;
+    // Start VAD immediately on the incoming stream
+    startVad(targetPeerId, remoteStream);
     audioEl
       .play()
-      .catch(() =>
+      .catch(() => {
         publishStatus(
           "connected",
           "Click the extension and use Enable audio if playback is blocked.",
-        ),
-      );
+        );
+      });
   };
 
   connection.onicecandidate = ({ candidate }) => {
@@ -144,24 +219,98 @@ async function getOrCreatePeerConnection(targetPeerId, generation = callGenerati
   return connection;
 }
 
+function stopVad(peerId) {
+  const handle = vadHandles.get(peerId);
+  if (handle) {
+    clearInterval(handle.intervalId);
+    try { handle.source.disconnect(); } catch { /* ok */ }
+    vadHandles.delete(peerId);
+  }
+  speakingPeers.delete(peerId);
+}
+
+function startVad(peerId, stream) {
+  stopVad(peerId); // clear any previous analyser for this peer
+  if (!stream || stream.getAudioTracks().length === 0) return;
+  try {
+    if (!audioCtx || audioCtx.state === "closed") {
+      audioCtx = new AudioContext();
+    }
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume().catch(() => {});
+    }
+    const source   = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    let lastSpokeAt = 0;
+    const intervalId = setInterval(() => {
+      analyser.getByteTimeDomainData(data);
+      // Compute RMS energy (128 = silence in time-domain representation)
+      let sum = 0;
+      for (const v of data) { const s = v - 128; sum += s * s; }
+      const rms = Math.sqrt(sum / data.length);
+
+      const isMuted = (peerId === "__local__") &&
+        (localStream?.getAudioTracks().every((t) => !t.enabled) ?? false);
+      const wasSpeaking = speakingPeers.has(peerId);
+
+      const now = Date.now();
+      if (!isMuted && rms > VAD_THRESHOLD) {
+        lastSpokeAt = now;
+      }
+
+      // Smooth hangover so indicator doesn't jitter/flicker between syllables
+      const isSpeaking = !isMuted && (now - lastSpokeAt < VAD_HANGOVER_MS);
+
+      if (isSpeaking) {
+        speakingPeers.add(peerId);
+      } else {
+        speakingPeers.delete(peerId);
+      }
+      if (speakingPeers.has(peerId) !== wasSpeaking) {
+        publishStatus(callStatus); // only re-publish when speaking state changes
+      }
+    }, VAD_POLL_MS);
+
+    vadHandles.set(peerId, { source, analyser, intervalId });
+  } catch {
+    // AudioContext might not be available in offscreen — degrade gracefully
+  }
+}
+
 function closePeer(targetPeerId) {
+  stopVad(targetPeerId);
+  peerUserIds.delete(targetPeerId);
+  peerDisplayNames.delete(targetPeerId);
+  peerMutedStates.delete(targetPeerId);
+  const dc = peerDataChannels.get(targetPeerId);
+  if (dc) {
+    try { dc.close(); } catch { /* ok */ }
+    peerDataChannels.delete(targetPeerId);
+  }
   const pc = peerConnections.get(targetPeerId);
   if (pc) {
     pc.ontrack = null;
     pc.onicecandidate = null;
+    pc.onconnectionstatechange = null;  // prevent stale callbacks after close
     pc.close();
     peerConnections.delete(targetPeerId);
   }
   const audio = remoteAudios.get(targetPeerId);
   if (audio) {
+    audio.autoplay = false;
     audio.pause();
     audio.srcObject = null;
+    try { audio.load(); } catch { /* ok - fully resets the media pipeline */ }
     remoteAudios.delete(targetPeerId);
   }
   pendingCandidates.delete(targetPeerId);
 }
 
-async function startCall({ roomId, serverUrl, role }) {
+async function startCall({ roomId, serverUrl, role, userId, displayName }) {
   if (
     callStatus !== "idle" &&
     callStatus !== "ended" &&
@@ -194,6 +343,22 @@ async function startCall({ roomId, serverUrl, role }) {
 
   activeRoomId = roomId;
   activeRole = role;
+  myUserId = userId || null;
+  if (!myUserId) {
+    try {
+      const stored = await chrome.storage.local.get("userId");
+      myUserId = stored?.userId || null;
+    } catch { /* ok */ }
+  }
+  myDisplayName = (typeof displayName === "string" && displayName.trim())
+    ? displayName.trim() : null;
+  if (!myDisplayName) {
+    try {
+      const stored = await chrome.storage.local.get("displayName");
+      myDisplayName = (typeof stored?.displayName === "string" && stored.displayName.trim())
+        ? stored.displayName.trim() : null;
+    } catch { /* ok */ }
+  }
   const generation = ++callGeneration;
   pendingCandidates.clear();
   publishStatus("connecting", "Joining the signaling server.");
@@ -203,7 +368,12 @@ async function startCall({ roomId, serverUrl, role }) {
     socket = callSocket;
     callSocket.addEventListener("open", () => {
       if (generation === callGeneration) {
-        callSocket.send(JSON.stringify({ type: "join", roomId }));
+        callSocket.send(JSON.stringify({
+          type: "join",
+          roomId,
+          userId: myUserId,
+          displayName: myDisplayName,
+        }));
       }
     });
     let messageQueue = Promise.resolve();
@@ -264,8 +434,14 @@ async function handleServerMessage(data, generation) {
     await getOrCreateLocalStream();
     if (generation !== callGeneration) return;
 
+    // peers is now [{peerId, userId, displayName}] from the updated server
     const existingPeers = Array.isArray(message.peers) ? message.peers : [];
-    for (const peerId of existingPeers) {
+    for (const peerInfo of existingPeers) {
+      const peerId      = typeof peerInfo === "object" ? peerInfo.peerId      : peerInfo;
+      const userId      = typeof peerInfo === "object" ? peerInfo.userId      : null;
+      const displayName = typeof peerInfo === "object" ? peerInfo.displayName : null;
+      if (userId)      peerUserIds.set(peerId, userId);
+      if (displayName) peerDisplayNames.set(peerId, displayName);
       const pc = await getOrCreatePeerConnection(peerId, generation);
       if (!pc || generation !== callGeneration) return;
       const offer = await pc.createOffer();
@@ -278,6 +454,8 @@ async function handleServerMessage(data, generation) {
     updateOverallStatus();
   } else if (message.type === "peer-joined") {
     const peerId = message.peerId || "default";
+    if (message.userId)      peerUserIds.set(peerId, message.userId);
+    if (message.displayName) peerDisplayNames.set(peerId, message.displayName);
     await getOrCreatePeerConnection(peerId, generation);
     updateOverallStatus();
   } else if (message.type === "offer") {
@@ -335,6 +513,26 @@ async function endCall() {
     closePeer(targetPeerId);
   }
 
+  // Safety net: stop any remote audio elements that fell out of sync with
+  // peerConnections (e.g. from a failed-then-removed peer).
+  stopVad("__local__");
+  for (const peerId of [...vadHandles.keys()]) stopVad(peerId);
+  speakingPeers.clear();
+  peerUserIds.clear();
+  peerDisplayNames.clear();
+  for (const dc of peerDataChannels.values()) {
+    try { dc.close(); } catch { /* ok */ }
+  }
+  peerDataChannels.clear();
+  peerMutedStates.clear();
+  for (const audio of remoteAudios.values()) {
+    audio.autoplay = false;
+    audio.pause();
+    audio.srcObject = null;
+    try { audio.load(); } catch { /* ok */ }
+  }
+  remoteAudios.clear();
+
   localStream?.getTracks().forEach((track) => track.stop());
   localStream = null;
   pendingCandidates.clear();
@@ -342,6 +540,8 @@ async function endCall() {
   activeRoomId = null;
   activeRole = null;
   myPeerId = null;
+  myUserId = null;
+  myDisplayName = null;
   publishStatus("ended");
 }
 
@@ -357,12 +557,37 @@ chrome.runtime.onMessage.addListener((message) => {
     message.action === "toggle-mute" &&
     localStream
   ) {
-    const shouldEnable = localStream
-      .getAudioTracks()
-      .some((track) => !track.enabled);
+    // Determine target state: if ALL tracks are enabled → mute; else → unmute.
+    const allEnabled = localStream.getAudioTracks().every((t) => t.enabled);
+    const shouldMute = allEnabled;
+
+    // 1. Set enabled on the MediaStreamTrack (controls what enters the encoder).
     localStream.getAudioTracks().forEach((track) => {
-      track.enabled = shouldEnable;
+      track.enabled = !shouldMute;
     });
+
+    // 2. Clear speaking state immediately if muted
+    if (shouldMute) {
+      speakingPeers.delete("__local__");
+    }
+
+    // 3. Mirror the change on every RTCRtpSender so the WebRTC layer
+    //    definitely sends silence — belt-and-suspenders for Chrome.
+    for (const pc of peerConnections.values()) {
+      for (const sender of pc.getSenders()) {
+        if (sender.track && sender.track.kind === "audio") {
+          sender.track.enabled = !shouldMute;
+        }
+      }
+    }
+
+    // 4. Broadcast mute state across peer data channels
+    for (const dc of peerDataChannels.values()) {
+      if (dc.readyState === "open") {
+        try { dc.send(JSON.stringify({ type: "mute-state", muted: shouldMute })); } catch {}
+      }
+    }
+
     publishStatus(callStatus);
   } else if (message.type === "STATUS_QUERY") {
     publishStatus(callStatus);

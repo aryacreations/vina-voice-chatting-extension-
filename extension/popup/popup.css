@@ -35,15 +35,52 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .mark { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 11px; background: var(--green); color: #fff; font-size: 12px; font-weight: 800; letter-spacing: 0; }
 .eyebrow, .status-label { margin: 0 0 2px; color: var(--muted); font: 500 9px 'Consolas', monospace; letter-spacing: 0; }
 h1 { margin: 0; font-size: 17px; line-height: 1.3; font-weight: 800; }
-.signal { width: 9px; height: 9px; margin-left: auto; border: 2px solid #aab6af; border-radius: 50%; background: #d8dfda; }
+.signal { width: 9px; height: 9px; margin-left: 8px; border: 2px solid #aab6af; border-radius: 50%; background: #d8dfda; flex-shrink: 0; }
 .signal[data-state='connected'] { border-color: #1d715c; background: #35a77b; box-shadow: 0 0 0 3px rgba(53, 167, 123, .12); }
 .signal[data-state='error'] { border-color: var(--coral); background: #e77460; }
 .signal[data-state='connecting'], .signal[data-state='waiting'], .signal[data-state='requesting-microphone'], .signal[data-state='reconnecting'] { border-color: var(--amber); background: #f0b65c; }
+
+/* ── User ID badge ────────────────────────────────────────────────── */
+.user-id-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin-left: auto;
+}
+.user-id-label {
+  color: var(--muted);
+  font: 500 8px 'Consolas', monospace;
+  letter-spacing: .04em;
+}
+.user-id-value {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  border: 1px solid rgba(29, 113, 92, .28);
+  border-radius: 5px;
+  background: rgba(29, 113, 92, .07);
+  color: var(--green-dark);
+  font: 700 9px 'Consolas', monospace;
+  letter-spacing: .06em;
+  white-space: nowrap;
+  transition: background .15s, box-shadow .15s, transform .12s;
+  cursor: pointer;
+}
+.user-id-value:hover {
+  background: rgba(29, 113, 92, .14);
+  box-shadow: 0 0 0 2px rgba(29, 113, 92, .15);
+  transform: translateY(-1px);
+}
+.user-id-value:active { transform: translateY(0); }
+
 
 .connection, .room, .join { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
 h2 { margin: 0; font-size: 12px; font-weight: 800; }
 .local-tag { padding: 3px 6px; border-radius: 4px; background: #e6eee8; color: #547264; font: 500 9px 'Consolas', monospace; }
+.live-tag  { background: rgba(29, 113, 92, .12); color: var(--green-dark); border: 1px solid rgba(29, 113, 92, .25); }
+
 input { width: 100%; min-width: 0; height: 37px; padding: 0 10px; border: 1px solid #d5dfd8; border-radius: 6px; outline: none; background: rgba(255,255,255,.72); color: var(--ink); font-size: 11px; transition: border-color .16s, box-shadow .16s; }
 input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(29, 113, 92, .1); }
 #server-url { font: 11px 'Consolas', monospace; }
@@ -140,6 +177,102 @@ footer { padding-top: 8px; border-top: 1px solid var(--line); color: #819087; fo
 
 [hidden] { display: none !important; }
 
+/* ── Participant roster ───────────────────────────────────────────── */
+.participants-section { padding: 14px 0 4px; border-top: 1px solid var(--line); }
+.participants-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.participant-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255,255,255,.6);
+  transition: border-color .2s, background .2s, box-shadow .2s;
+}
+.participant-card.is-speaking {
+  border-color: rgba(29,113,92,.55);
+  background: rgba(29,113,92,.07);
+  box-shadow: 0 0 0 3px rgba(29,113,92,.14);
+}
+.participant-card.is-local { background: rgba(209,234,220,.28); }
+.participant-card.is-local.is-speaking {
+  border-color: var(--green);
+  background: rgba(209,234,220,.5);
+  box-shadow: 0 0 0 3px rgba(29,113,92,.2);
+}
+
+.participant-avatar {
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(29,113,92,.1);
+  display: grid;
+  place-items: center;
+  transition: background .2s;
+}
+.participant-avatar.is-speaking {
+  background: rgba(29,113,92,.22);
+}
+.participant-avatar.is-muted {
+  background: rgba(189,79,61,.1);
+}
+.participant-mic {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke .2s;
+}
+.participant-avatar.is-muted .participant-mic  { stroke: var(--coral); }
+.participant-avatar.is-speaking .participant-mic { stroke: var(--green); }
+.participant-avatar.is-speaking::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid var(--green);
+  animation: speak-ring .8s ease-out infinite;
+}
+@keyframes speak-ring {
+  0%   { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.5); }
+}
+
+.participant-info { flex: 1; min-width: 0; }
+.participant-id {
+  display: block;
+  font: 700 11px system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+  letter-spacing: .01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.participant-id.is-local::after { content: ' (you)'; color: var(--green); font-weight: 600; font-size: 10px; }
+.participant-sub {
+  display: block;
+  font: 500 9px 'Consolas', monospace;
+  color: var(--muted);
+  letter-spacing: .04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.participant-role { display: block; font-size: 8px; color: var(--muted); margin-top: 1px; text-transform: uppercase; letter-spacing: .05em; }
+
+.participant-badges { display: flex; gap: 4px; flex-shrink: 0; }
+.badge { padding: 2px 5px; border-radius: 3px; font: 600 8px 'Consolas', monospace; letter-spacing: .04em; }
+.badge-speaking { background: rgba(29,113,92,.15); color: var(--green-dark); }
+.badge-muted    { background: #f8e6e1; color: #9e3929; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
-}
+  .participant-avatar.is-speaking::after { animation: none; }
+}

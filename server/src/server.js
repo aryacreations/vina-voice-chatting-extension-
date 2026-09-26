@@ -185,8 +185,9 @@ function createSignalingServer(options = {}) {
 
   httpServer.on("upgrade", (request, socket, head) => {
     const origin = request.headers.origin;
+    const path = (request.url || "").split("?")[0];
     if (
-      request.url !== "/signal" ||
+      !["/signal", "/health", "/"].includes(path) ||
       (config.allowedOrigins.size > 0 && !config.allowedOrigins.has(origin)) ||
       (config.production && !origin)
     ) {
@@ -212,6 +213,7 @@ function createSignalingServer(options = {}) {
     });
     socket.roomId = null;
     socket.role = null;
+    socket.userId = null;   // persistent caller ID sent by the extension
 
     socket.on("message", (rawMessage, isBinary) => {
       if (isBinary) {
@@ -231,6 +233,8 @@ function createSignalingServer(options = {}) {
         !hasOnlyKeys(message, [
           "type",
           "roomId",
+          "userId",
+          "displayName",
           "payload",
           "targetPeerId",
           "fromPeerId",
@@ -243,7 +247,7 @@ function createSignalingServer(options = {}) {
       if (message.type === "join") {
         if (
           socket.roomId ||
-          !hasOnlyKeys(message, ["type", "roomId"]) ||
+          !hasOnlyKeys(message, ["type", "roomId", "userId", "displayName"]) ||
           typeof message.roomId !== "string" ||
           !ROOM_ID_PATTERN.test(message.roomId)
         ) {
@@ -278,7 +282,17 @@ function createSignalingServer(options = {}) {
 
         socket.roomId = message.roomId;
         socket.role = room.length === 0 ? "host" : "guest";
-        const existingPeers = room.map((peer) => peer.peerId);
+        // Store the persistent caller ID (may be absent for older clients)
+        socket.userId = (typeof message.userId === "string" && message.userId.length <= 32)
+          ? message.userId : null;
+        // Store the human-readable display name
+        socket.displayName = (typeof message.displayName === "string" && message.displayName.trim().length > 0)
+          ? message.displayName.trim().slice(0, 50) : null;
+        const existingPeers = room.map((peer) => ({
+          peerId: peer.peerId,
+          userId: peer.userId,
+          displayName: peer.displayName,
+        }));
         room.push(socket);
 
         send(socket, {
@@ -296,6 +310,8 @@ function createSignalingServer(options = {}) {
             send(peer, {
               type: "peer-joined",
               peerId: socket.peerId,
+              userId: socket.userId,
+              displayName: socket.displayName,
             });
           }
         }
