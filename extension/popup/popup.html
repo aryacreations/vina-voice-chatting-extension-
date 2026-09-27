@@ -100,13 +100,25 @@
             <input id="volume-slider" type="range" min="0" max="200" step="5" value="100" aria-label="Incoming call volume">
           </div>
           <div id="call-controls" class="call-controls" hidden>
-            <button class="icon-button control-button" id="mute-button" type="button" title="Mute microphone" aria-label="Mute microphone">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path></svg>
-            </button>
-            <button class="button button-leave" id="leave-button" type="button">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 16 4-3 5-4-4H9l-3 3z"></path></svg>
-              Leave call
-            </button>
+            <div class="call-controls-row">
+              <button class="icon-button control-button" id="mute-button" type="button" title="Mute microphone" aria-label="Mute microphone">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path></svg>
+              </button>
+              <button class="button button-leave" id="leave-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 10 16 4-3 5-4-4H9l-3 3z"></path></svg>
+                Leave call
+              </button>
+            </div>
+            <div class="volume-row">
+              <button class="icon-button volume-icon-btn" id="volume-icon-btn" type="button" title="Toggle mute volume" aria-label="Toggle mute volume">
+                <svg id="volume-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                </svg>
+              </button>
+              <input type="range" id="volume-slider" class="volume-slider" min="0" max="100" value="100" step="1" aria-label="Remote volume">
+              <span id="volume-label" class="volume-label">100%</span>
+            </div>
           </div>
           <button id="enable-audio" class="text-button" type="button" hidden>Enable audio</button>
           <p id="toast" class="toast" role="status"></p>

@@ -1,30 +1,31 @@
 /* ── element refs ───────────────────────────────────── */
-const serverUrlInput = document.querySelector("#server-url");
-const serverTag = document.querySelector("#server-tag");
+const serverUrlInput   = document.querySelector("#server-url");
+const serverTag        = document.querySelector("#server-tag");
 const createRoomButton = document.querySelector("#create-room");
-const joinForm = document.querySelector("#join-form");
-const joinCodeInput = document.querySelector("#join-code");
-const roomCode = document.querySelector("#room-code");
-const copyRoomButton = document.querySelector("#copy-room");
-const statusText = document.querySelector("#status-text");
-const statusDetail = document.querySelector("#status-detail");
-const signalIndicator = document.querySelector("#signal");
-const callControls = document.querySelector("#call-controls");
-const muteButton = document.querySelector("#mute-button");
-const leaveButton = document.querySelector("#leave-button");
-const enableAudioButton = document.querySelector("#enable-audio");
-const volumeControl = document.querySelector("#volume-control");
-const volumeSlider = document.querySelector("#volume-slider");
-const volumeValue = document.querySelector("#volume-value");
-const toast = document.querySelector("#toast");
-const micGuide = document.querySelector("#mic-guide");
-const mainUi = document.querySelector("#main-ui");
-const retryBtn = document.querySelector("#retry-after-settings");
-const userIdButton = document.querySelector("#user-id");
+const joinForm         = document.querySelector("#join-form");
+const joinCodeInput    = document.querySelector("#join-code");
+const roomCode         = document.querySelector("#room-code");
+const copyRoomButton   = document.querySelector("#copy-room");
+const statusText       = document.querySelector("#status-text");
+const statusDetail     = document.querySelector("#status-detail");
+const signalIndicator  = document.querySelector("#signal");
+const callControls     = document.querySelector("#call-controls");
+const muteButton       = document.querySelector("#mute-button");
+const leaveButton      = document.querySelector("#leave-button");
+const enableAudioButton= document.querySelector("#enable-audio");
+const toast            = document.querySelector("#toast");
+const micGuide         = document.querySelector("#mic-guide");
+const mainUi           = document.querySelector("#main-ui");
+const retryBtn         = document.querySelector("#retry-after-settings");
+const userIdButton     = document.querySelector("#user-id");
 const displayNameInput = document.querySelector("#display-name");
 const participantsSection = document.querySelector("#participants-section");
-const participantsList = document.querySelector("#participants-list");
-const participantsCount = document.querySelector("#participants-count");
+const participantsList    = document.querySelector("#participants-list");
+const participantsCount   = document.querySelector("#participants-count");
+const volumeSlider        = document.querySelector("#volume-slider");
+const volumeLabel         = document.querySelector("#volume-label");
+const volumeIconBtn       = document.querySelector("#volume-icon-btn");
+const volumeIconSvg       = document.querySelector("#volume-icon");
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 // Hosts already covered by manifest host_permissions — no runtime permission prompt needed
@@ -34,24 +35,61 @@ const MANIFEST_HOSTS = new Set([
   "[::1]",
   "vina-voice-chatting-extension.onrender.com",
 ]);
-let lastCallParams = null; // kept so "Done – Try again" can re-issue the same call
+let lastCallParams = null;   // kept so "Done – Try again" can re-issue the same call
 
 let myUserId = null;
 let myDisplayName = null;
+let myRole = null;  // "host" | "guest" | null
 
 /* ── status labels ──────────────────────────────────── */
 const statusLabels = {
-  idle: "Ready when you are",
-  ended: "Call ended",
-  "requesting-microphone": "Connecting…",
-  waiting: "Waiting for participants",
-  connecting: "Connecting audio",
-  connected: "Voice connected",
-  reconnecting: "Connection interrupted",
-  error: "Could not connect",
+  idle:                   "Ready when you are",
+  ended:                  "Call ended",
+  "requesting-microphone":"Connecting…",
+  waiting:                "Waiting for participants",
+  connecting:             "Connecting audio",
+  connected:              "Voice connected",
+  reconnecting:           "Connection interrupted",
+  error:                  "Could not connect",
 };
 
 /* ── helpers ────────────────────────────────────────── */
+
+// SVG path sets for the volume icon
+const VOL_HIGH_PATHS = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>`;
+const VOL_LOW_PATHS  = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>`;
+const VOL_MUTE_PATHS = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>`;
+
+let volumeMuted = false; // true when the user clicked the icon to silence all remotes
+let lastVolume  = 100;   // last non-zero slider value (for unmute restore)
+
+function updateVolumeSliderFill(value) {
+  const pct = value + "%";
+  volumeSlider.style.background =
+    `linear-gradient(to right, var(--green) 0%, var(--green) ${pct}, #d5dfd8 ${pct})`;
+}
+
+function applyVolumeIcon(value) {
+  if (volumeMuted || value === 0) {
+    volumeIconSvg.innerHTML = VOL_MUTE_PATHS;
+    volumeIconBtn.classList.add("is-muted-vol");
+  } else if (value < 50) {
+    volumeIconSvg.innerHTML = VOL_LOW_PATHS;
+    volumeIconBtn.classList.remove("is-muted-vol");
+  } else {
+    volumeIconSvg.innerHTML = VOL_HIGH_PATHS;
+    volumeIconBtn.classList.remove("is-muted-vol");
+  }
+}
+
+function setRemoteVolume(value) {
+  chrome.runtime.sendMessage({
+    target: "offscreen",
+    type: "SET_VOLUME",
+    volume: value / 100,
+  }).catch(() => {});
+}
+
 function updateServerTag(url) {
   if (!serverTag) return;
   try {
@@ -67,53 +105,32 @@ function updateServerTag(url) {
 
 function showMicGuide() {
   micGuide.hidden = false;
-  mainUi.hidden = true;
+  mainUi.hidden   = true;
 }
 function hideMicGuide() {
   micGuide.hidden = true;
-  mainUi.hidden = false;
+  mainUi.hidden   = false;
 }
 
-function setStatus({
-  status = "idle",
-  detail = "",
-  roomId = null,
-  muted = false,
-  moderationMuted = false,
-  canModerate = false,
-  peers = [],
-}) {
+function setStatus({ status = "idle", detail = "", roomId = null, muted = false, peers = [], role = null }) {
+  if (role) myRole = role;
   statusText.textContent = statusLabels[status] || status;
   statusDetail.textContent = detail;
   signalIndicator.dataset.state = status;
 
-  const inCall = [
-    "requesting-microphone",
-    "waiting",
-    "connecting",
-    "connected",
-    "reconnecting",
-    "error",
-  ].includes(status);
+  const inCall = ["requesting-microphone","waiting","connecting","connected","reconnecting","error"].includes(status);
   callControls.hidden = !inCall;
   muteButton.classList.toggle("is-muted", muted);
-  muteButton.disabled = moderationMuted;
-  muteButton.title = moderationMuted
-    ? "Muted by the room host"
-    : muted
-      ? "Unmute microphone"
-      : "Mute microphone";
+  muteButton.title = muted ? "Unmute microphone" : "Mute microphone";
   muteButton.setAttribute("aria-label", muteButton.title);
-  enableAudioButton.hidden =
-    status !== "connected" || !detail.includes("Enable audio");
-  volumeControl.hidden = !inCall;
+  enableAudioButton.hidden = status !== "connected" || !detail.includes("Enable audio");
 
   if (roomId) roomCode.textContent = roomId;
   copyRoomButton.disabled = !roomId;
   createRoomButton.disabled = inCall;
   joinForm.querySelector("button").disabled = inCall;
 
-  renderParticipants(peers, inCall, canModerate);
+  renderParticipants(peers, inCall);
 }
 
 /* ── participant roster ─────────────────────────────────────────────────── */
@@ -124,12 +141,9 @@ const MIC_SVG = `<svg class="participant-mic" viewBox="0 0 24 24" aria-hidden="t
   <path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path>
 </svg>`;
 
-function renderParticipants(peers, inCall, canModerate) {
+function renderParticipants(peers, inCall) {
   participantsSection.hidden = !inCall || peers.length === 0;
-  if (!inCall || peers.length === 0) {
-    participantsList.innerHTML = "";
-    return;
-  }
+  if (!inCall || peers.length === 0) { participantsList.innerHTML = ""; return; }
 
   participantsCount.textContent = peers.length;
 
@@ -156,79 +170,128 @@ function renderParticipants(peers, inCall, canModerate) {
           <span class="participant-role"></span>
         </div>
         <div class="participant-badges"></div>
-        <div class="participant-actions"></div>`;
+        <div class="participant-admin-actions"></div>`;
     }
 
-    const avatar = card.querySelector(".participant-avatar");
-    const idEl = card.querySelector(".participant-id");
-    const subEl = card.querySelector(".participant-sub");
-    const roleEl = card.querySelector(".participant-role");
-    const badgesEl = card.querySelector(".participant-badges");
-    const actionsEl = card.querySelector(".participant-actions");
+    const avatar      = card.querySelector(".participant-avatar");
+    const idEl        = card.querySelector(".participant-id");
+    const subEl       = card.querySelector(".participant-sub");
+    const roleEl      = card.querySelector(".participant-role");
+    const badgesEl    = card.querySelector(".participant-badges");
+    const adminActEl  = card.querySelector(".participant-admin-actions");
 
     // Primary label: displayName → userId → short peerId
-    const primaryLabel =
-      peer.displayName ||
-      (peer.isLocal ? myDisplayName : null) ||
-      peer.userId ||
-      (peer.isLocal ? myUserId : null) ||
-      (peer.peerId ? peer.peerId.slice(0, 13) : "—");
+    const primaryLabel = peer.displayName
+      || (peer.isLocal ? myDisplayName : null)
+      || peer.userId
+      || (peer.isLocal ? myUserId : null)
+      || (peer.peerId ? peer.peerId.slice(0, 13) : "—");
     // Secondary label: userId (only if different from primary)
-    const secondaryLabel =
-      peer.userId && peer.userId !== primaryLabel ? peer.userId : null;
+    const secondaryLabel = peer.userId && peer.userId !== primaryLabel ? peer.userId : null;
 
-    idEl.textContent = primaryLabel;
+    idEl.textContent  = primaryLabel;
     if (subEl) subEl.textContent = secondaryLabel || "";
     if (subEl) subEl.hidden = !secondaryLabel;
     roleEl.textContent = peer.isLocal ? "You" : "Peer";
 
-    card.classList.toggle("is-local", !!peer.isLocal);
+    card.classList.toggle("is-local",    !!peer.isLocal);
     card.classList.toggle("is-speaking", !!peer.speaking);
     card.classList.toggle("is-muted-card", !!peer.muted);
     avatar.classList.toggle("is-speaking", !!peer.speaking);
-    avatar.classList.toggle("is-muted", !!peer.muted);
-    idEl.classList.toggle("is-local", !!peer.isLocal);
+    avatar.classList.toggle("is-muted",    !!peer.muted);
+    idEl.classList.toggle("is-local",    !!peer.isLocal);
 
     // Badges
     badgesEl.innerHTML = "";
     if (peer.speaking) {
       const b = document.createElement("span");
-      b.className = "badge badge-speaking";
-      b.textContent = "SPEAKING";
+      b.className = "badge badge-speaking"; b.textContent = "SPEAKING";
       badgesEl.appendChild(b);
     }
     if (peer.muted) {
       const b = document.createElement("span");
-      b.className = "badge badge-muted";
-      b.textContent = "MUTED";
+      b.className = "badge badge-muted"; b.textContent = "MUTED";
       badgesEl.appendChild(b);
     }
 
-    actionsEl.replaceChildren();
-    if (canModerate && !peer.isLocal) {
-      const muteAction = document.createElement("button");
-      muteAction.className = "participant-action";
-      muteAction.type = "button";
-      muteAction.dataset.moderation = peer.muted ? "unmute" : "mute";
-      muteAction.dataset.peerId = peer.peerId;
-      muteAction.textContent = peer.muted ? "Unmute" : "Mute";
-      muteAction.setAttribute(
-        "aria-label",
-        `${peer.muted ? "Unmute" : "Mute"} ${primaryLabel}`,
-      );
+    // Admin controls — only visible to the host, only on non-local peers
+    adminActEl.innerHTML = "";
+    if (myRole === "host" && !peer.isLocal) {
+      // ── Mute / Unmute toggle ──────────────────────────────────────
+      const muteBtn = document.createElement("button");
+      muteBtn.type = "button";
 
-      const kickAction = document.createElement("button");
-      kickAction.className = "icon-button participant-kick";
-      kickAction.type = "button";
-      kickAction.dataset.moderation = "kick";
-      kickAction.dataset.peerId = peer.peerId;
-      kickAction.title = `Remove ${primaryLabel} from room`;
-      kickAction.setAttribute("aria-label", kickAction.title);
-      kickAction.innerHTML =
-        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"></path></svg>';
+      if (peer.adminMuted) {
+        // Currently admin-muted → show Unmute button
+        muteBtn.className = "admin-mute-btn is-admin-muted";
+        muteBtn.title = "Unmute this participant";
+        muteBtn.setAttribute("aria-label", "Unmute participant");
+        muteBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+        </svg>`;
+        muteBtn.addEventListener("click", () => {
+          sendBackgroundMessage({ type: "ADMIN_UNMUTE_PEER", peerId: peer.peerId }).catch(() => {});
+          muteBtn.disabled = true;
+          muteBtn.title = "Unmute sent…";
+        });
+      } else {
+        // Not admin-muted → show Mute button
+        muteBtn.className = "admin-mute-btn";
+        muteBtn.title = "Force mute this participant";
+        muteBtn.setAttribute("aria-label", "Force mute participant");
+        muteBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+          <path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path>
+          <line x1="2" y1="2" x2="22" y2="22"></line>
+        </svg>`;
+        muteBtn.addEventListener("click", () => {
+          sendBackgroundMessage({ type: "ADMIN_MUTE_PEER", peerId: peer.peerId }).catch(() => {});
+          muteBtn.disabled = true;
+          muteBtn.title = "Mute sent…";
+          muteBtn.classList.add("is-admin-muted");
+        });
+      }
+      adminActEl.appendChild(muteBtn);
 
-      actionsEl.append(muteAction, kickAction);
+      // ── Kick button ──────────────────────────────────────────────
+      const kickBtn = document.createElement("button");
+      kickBtn.type = "button";
+      kickBtn.className = "admin-kick-btn";
+      kickBtn.title = "Remove this participant from the call";
+      kickBtn.setAttribute("aria-label", "Kick participant");
+      kickBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>`;
+
+      let kickConfirmTimer = null;
+      kickBtn.addEventListener("click", () => {
+        if (!kickBtn.classList.contains("is-confirming")) {
+          // First click — enter "confirm?" state
+          kickBtn.classList.add("is-confirming");
+          kickBtn.title = "Click again to confirm kick";
+          kickBtn.setAttribute("aria-label", "Click again to confirm kick");
+          // Auto-cancel after 3 s if user changes their mind
+          kickConfirmTimer = setTimeout(() => {
+            kickBtn.classList.remove("is-confirming");
+            kickBtn.title = "Remove this participant from the call";
+            kickBtn.setAttribute("aria-label", "Kick participant");
+          }, 3000);
+        } else {
+          // Second click — confirmed, send kick
+          clearTimeout(kickConfirmTimer);
+          kickBtn.disabled = true;
+          kickBtn.title = "Removing…";
+          kickBtn.classList.remove("is-confirming");
+          sendBackgroundMessage({ type: "ADMIN_KICK_PEER", peerId: peer.peerId }).catch(() => {});
+        }
+      });
+      adminActEl.appendChild(kickBtn);
+
     }
+
 
     fragment.appendChild(card);
     existing.delete(key);
@@ -239,22 +302,17 @@ function renderParticipants(peers, inCall, canModerate) {
   participantsList.appendChild(fragment);
 }
 
+
 async function sendBackgroundMessage(message) {
-  const res = await chrome.runtime.sendMessage({
-    ...message,
-    target: "background",
-  });
-  if (!res?.ok)
-    throw new Error(
-      res?.error || "The extension could not complete that action.",
-    );
+  const res = await chrome.runtime.sendMessage({ ...message, target: "background" });
+  if (!res?.ok) throw new Error(res?.error || "The extension could not complete that action.");
 }
 
 function generate6CharCode() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => chars[b % chars.length]).join("");
+  return Array.from(bytes, b => chars[b % chars.length]).join("");
 }
 
 /* ── mic permission (MUST be called inside a user-gesture handler) ── */
@@ -262,11 +320,8 @@ async function requestMicPermission() {
   // getUserMedia from a popup button click = Chrome's native permission dialog.
   // We stop the stream immediately — we only need permission granted.
   // The offscreen document opens its own stream for the actual call.
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: true,
-    video: false,
-  });
-  stream.getTracks().forEach((t) => t.stop());
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  stream.getTracks().forEach(t => t.stop());
 }
 
 /* ── start call ─────────────────────────────────────── */
@@ -279,31 +334,21 @@ async function startCall(roomId, role) {
     chrome.storage.local.set({ serverUrl }).catch(() => {});
   }
   let server;
-  try {
-    server = new URL(serverUrl);
-  } catch {
-    toast.textContent = "Enter a valid signaling server URL.";
-    return;
-  }
+  try { server = new URL(serverUrl); }
+  catch { toast.textContent = "Enter a valid signaling server URL."; return; }
 
   if (!["ws:", "wss:"].includes(server.protocol)) {
-    toast.textContent = "The URL must start with ws:// or wss://.";
-    return;
+    toast.textContent = "The URL must start with ws:// or wss://."; return;
   }
   if (server.protocol === "ws:" && !LOCAL_HOSTS.has(server.hostname)) {
-    toast.textContent =
-      "Use WSS for remote servers; WS is only allowed on localhost.";
-    return;
+    toast.textContent = "Use WSS for remote servers; WS is only allowed on localhost."; return;
   }
 
   // Optional host permission for servers not already covered by the manifest
   if (!MANIFEST_HOSTS.has(server.hostname)) {
     const origin = `${server.protocol === "wss:" ? "https:" : "http:"}//${server.host}/*`;
     const ok = await chrome.permissions.request({ origins: [origin] });
-    if (!ok) {
-      toast.textContent = "Permission for this server was not granted.";
-      return;
-    }
+    if (!ok) { toast.textContent = "Permission for this server was not granted."; return; }
   }
 
   // ── Microphone permission ────────────────────────────
@@ -322,11 +367,7 @@ async function startCall(roomId, role) {
   // Mic granted — launch the call
   lastCallParams = { roomId, role, serverUrl };
   roomCode.textContent = roomId;
-  setStatus({
-    status: "requesting-microphone",
-    detail: "Joining room…",
-    roomId,
-  });
+  setStatus({ status: "requesting-microphone", detail: "Joining room…", roomId });
 
   try {
     const displayName = displayNameInput.value.trim() || null;
@@ -348,26 +389,18 @@ async function startCall(roomId, role) {
 }
 
 /* ── button handlers ────────────────────────────────── */
-createRoomButton.addEventListener("click", () =>
-  startCall(generate6CharCode(), "host"),
-);
+createRoomButton.addEventListener("click", () => startCall(generate6CharCode(), "host"));
 
 joinForm.addEventListener("submit", (ev) => {
   ev.preventDefault();
   const code = joinCodeInput.value.trim().toUpperCase();
-  if (code.length < 4) {
-    toast.textContent = "Enter a valid room code.";
-    return;
-  }
+  if (code.length < 4) { toast.textContent = "Enter a valid room code."; return; }
   startCall(code, "guest");
 });
 
 // "Done – Try again" button in the mic guide
 retryBtn.addEventListener("click", async () => {
-  if (!lastCallParams) {
-    hideMicGuide();
-    return;
-  }
+  if (!lastCallParams) { hideMicGuide(); return; }
   const { roomId, role, serverUrl } = lastCallParams;
   hideMicGuide();
   toast.textContent = "";
@@ -378,24 +411,15 @@ retryBtn.addEventListener("click", async () => {
   } catch {
     // Still blocked — show the guide again
     showMicGuide();
-    toast.textContent =
-      "Microphone still blocked. Please follow the steps above.";
+    toast.textContent = "Microphone still blocked. Please follow the steps above.";
     return;
   }
 
   // Clean up any previous failed state
-  try {
-    await sendBackgroundMessage({ type: "CALL_ACTION", action: "leave" });
-  } catch {
-    /* ok */
-  }
+  try { await sendBackgroundMessage({ type: "CALL_ACTION", action: "leave" }); } catch { /* ok */ }
 
   roomCode.textContent = roomId;
-  setStatus({
-    status: "requesting-microphone",
-    detail: "Joining room…",
-    roomId,
-  });
+  setStatus({ status: "requesting-microphone", detail: "Joining room…", roomId });
 
   try {
     const displayName = displayNameInput.value.trim() || myDisplayName || null;
@@ -417,12 +441,8 @@ copyRoomButton.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(roomCode.textContent);
     toast.textContent = "Room code copied!";
-    setTimeout(() => {
-      if (toast.textContent === "Room code copied!") toast.textContent = "";
-    }, 2000);
-  } catch {
-    toast.textContent = "Could not copy the room code.";
-  }
+    setTimeout(() => { if (toast.textContent === "Room code copied!") toast.textContent = ""; }, 2000);
+  } catch { toast.textContent = "Could not copy the room code."; }
 });
 
 muteButton.addEventListener("click", async () => {
@@ -432,59 +452,12 @@ muteButton.addEventListener("click", async () => {
   muteButton.classList.toggle("is-muted", !wasMuted);
   muteButton.title = wasMuted ? "Mute microphone" : "Unmute microphone";
   muteButton.setAttribute("aria-label", muteButton.title);
-  try {
-    await sendBackgroundMessage({ type: "CALL_ACTION", action: "toggle-mute" });
-  } catch (err) {
+  try { await sendBackgroundMessage({ type: "CALL_ACTION", action: "toggle-mute" }); }
+  catch (err) {
     // Revert on failure
     muteButton.classList.toggle("is-muted", wasMuted);
     toast.textContent = err.message;
   }
-});
-
-participantsList.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-moderation]");
-  if (!button) return;
-  const { moderation, peerId } = button.dataset;
-  const name =
-    button.closest(".participant-card")?.querySelector(".participant-id")
-      ?.textContent || "this participant";
-  if (
-    moderation === "kick" &&
-    !window.confirm(`Remove ${name} from this room?`)
-  )
-    return;
-
-  button.disabled = true;
-  try {
-    await sendBackgroundMessage({
-      type: "CALL_ACTION",
-      action: "moderate",
-      moderation,
-      targetPeerId: peerId,
-    });
-    toast.textContent =
-      moderation === "kick"
-        ? `${name} removed from the room.`
-        : `Participant ${moderation === "mute" ? "muted" : "unmuted"}.`;
-  } catch (err) {
-    toast.textContent = err.message;
-  } finally {
-    button.disabled = false;
-  }
-});
-
-volumeSlider.addEventListener("input", () => {
-  const volumePercent = Number(volumeSlider.value);
-  volumeValue.value = `${volumePercent}%`;
-  volumeValue.textContent = `${volumePercent}%`;
-  chrome.storage.local.set({ outputVolume: volumePercent }).catch(() => {});
-  sendBackgroundMessage({
-    type: "CALL_ACTION",
-    action: "set-volume",
-    volume: volumePercent / 100,
-  }).catch((err) => {
-    toast.textContent = err.message;
-  });
 });
 
 leaveButton.addEventListener("click", async () => {
@@ -492,15 +465,55 @@ leaveButton.addEventListener("click", async () => {
   hideMicGuide();
   // Update the popup UI immediately — don't wait for the offscreen round-trip.
   setStatus({ status: "ended" });
-  try {
-    await sendBackgroundMessage({ type: "CALL_ACTION", action: "leave" });
-  } catch (err) {
-    toast.textContent = err.message;
-  }
+  try { await sendBackgroundMessage({ type: "CALL_ACTION", action: "leave" }); }
+  catch (err) { toast.textContent = err.message; }
 });
 
 enableAudioButton.addEventListener("click", () => {
   chrome.runtime.sendMessage({ target: "offscreen", type: "ENABLE_AUDIO" });
+});
+
+/* ── volume controls ─────────────────────────────────── */
+
+// Initialise fill gradient on load
+updateVolumeSliderFill(Number(volumeSlider.value));
+applyVolumeIcon(Number(volumeSlider.value));
+
+// Slider — live update while dragging
+volumeSlider.addEventListener("input", () => {
+  const val = Number(volumeSlider.value);
+  volumeLabel.textContent = val + "%";
+  updateVolumeSliderFill(val);
+  if (val > 0) { lastVolume = val; volumeMuted = false; }
+  else         { volumeMuted = true; }
+  applyVolumeIcon(val);
+  setRemoteVolume(volumeMuted ? 0 : val);
+  chrome.storage.local.set({ remoteVolume: val }).catch(() => {});
+});
+
+// Icon button — click to toggle mute/unmute volume
+volumeIconBtn.addEventListener("click", () => {
+  if (volumeMuted || Number(volumeSlider.value) === 0) {
+    // Unmute: restore last non-zero level
+    const restore = lastVolume > 0 ? lastVolume : 100;
+    volumeSlider.value = restore;
+    volumeLabel.textContent = restore + "%";
+    volumeMuted = false;
+    updateVolumeSliderFill(restore);
+    applyVolumeIcon(restore);
+    setRemoteVolume(restore);
+    chrome.storage.local.set({ remoteVolume: restore }).catch(() => {});
+  } else {
+    // Mute: save current and set to 0
+    lastVolume = Number(volumeSlider.value);
+    volumeSlider.value = 0;
+    volumeLabel.textContent = "0%";
+    volumeMuted = true;
+    updateVolumeSliderFill(0);
+    applyVolumeIcon(0);
+    setRemoteVolume(0);
+    chrome.storage.local.set({ remoteVolume: 0 }).catch(() => {});
+  }
 });
 
 /* ── receive status updates from offscreen ──────────── */
@@ -516,10 +529,7 @@ async function init() {
 
   // Load the persistent user ID from the service worker.
   try {
-    const res = await chrome.runtime.sendMessage({
-      target: "background",
-      type: "GET_USER_ID",
-    });
+    const res = await chrome.runtime.sendMessage({ target: "background", type: "GET_USER_ID" });
     if (res?.ok && res.userId) {
       myUserId = res.userId;
       userIdButton.textContent = res.userId;
@@ -529,17 +539,14 @@ async function init() {
     userIdButton.textContent = "Error";
   }
 
-  const DEFAULT_SERVER_URL =
-    "wss://vina-voice-chatting-extension.onrender.com/signal";
+  const DEFAULT_SERVER_URL = "wss://vina-voice-chatting-extension.onrender.com/signal";
 
   // Load and persist the signaling server URL.
   try {
     const stored = await chrome.storage.local.get("serverUrl");
-    const isOldDefault =
-      !stored.serverUrl ||
-      stored.serverUrl === "ws://localhost:3000/signal" ||
-      stored.serverUrl ===
-        "wss://vina-voice-chatting-extension.onrender.com/health";
+    const isOldDefault = !stored.serverUrl
+      || stored.serverUrl === "ws://localhost:3000/signal"
+      || stored.serverUrl === "wss://vina-voice-chatting-extension.onrender.com/health";
     if (stored.serverUrl && !isOldDefault) {
       serverUrlInput.value = stored.serverUrl;
     } else {
@@ -569,36 +576,31 @@ async function init() {
       myDisplayName = stored.displayName;
       displayNameInput.value = stored.displayName;
     }
-  } catch {
-    /* ok — storage unavailable */
-  }
-
-  try {
-    const stored = await chrome.storage.local.get("outputVolume");
-    const volumePercent = Number(stored.outputVolume);
-    if (Number.isFinite(volumePercent)) {
-      volumeSlider.value = String(Math.max(0, Math.min(200, volumePercent)));
-    }
-    volumeValue.value = `${volumeSlider.value}%`;
-    volumeValue.textContent = `${volumeSlider.value}%`;
-  } catch {
-    /* ok — use the default volume */
-  }
+  } catch { /* ok — storage unavailable */ }
 
   // Save display name whenever the user finishes editing.
   displayNameInput.addEventListener("blur", async () => {
     const name = displayNameInput.value.trim();
     myDisplayName = name || null;
-    try {
-      await chrome.storage.local.set({ displayName: name });
-    } catch {
-      /* ok */
-    }
+    try { await chrome.storage.local.set({ displayName: name }); } catch { /* ok */ }
   });
 
-  chrome.runtime
-    .sendMessage({ target: "background", type: "GET_CALL_STATUS" })
-    .catch(() => {});
+  // Restore saved remote volume
+  try {
+    const stored = await chrome.storage.local.get("remoteVolume");
+    if (stored.remoteVolume != null) {
+      const vol = Number(stored.remoteVolume);
+      volumeSlider.value = vol;
+      volumeLabel.textContent = vol + "%";
+      if (vol === 0) { volumeMuted = true; lastVolume = 100; }
+      else           { lastVolume = vol; }
+      updateVolumeSliderFill(vol);
+      applyVolumeIcon(vol);
+      setRemoteVolume(volumeMuted ? 0 : vol);
+    }
+  } catch { /* ok */ }
+
+  chrome.runtime.sendMessage({ target: "background", type: "GET_CALL_STATUS" }).catch(() => {});
 }
 
 // Click-to-copy the caller ID from the header badge
@@ -608,9 +610,7 @@ userIdButton.addEventListener("click", async () => {
     await navigator.clipboard.writeText(myUserId);
     const original = userIdButton.textContent;
     userIdButton.textContent = "Copied!";
-    setTimeout(() => {
-      userIdButton.textContent = original;
-    }, 1500);
+    setTimeout(() => { userIdButton.textContent = original; }, 1500);
   } catch {
     toast.textContent = "Could not copy the caller ID.";
   }

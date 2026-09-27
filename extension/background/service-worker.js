@@ -117,6 +117,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
+    if (message.type === "ADMIN_MUTE_PEER") {
+      await ensureOffscreenDocument();
+      chrome.runtime.sendMessage({ ...message, target: "offscreen" });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === "ADMIN_UNMUTE_PEER") {
+      await ensureOffscreenDocument();
+      chrome.runtime.sendMessage({ ...message, target: "offscreen" });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === "ADMIN_KICK_PEER") {
+      await ensureOffscreenDocument();
+      chrome.runtime.sendMessage({ ...message, target: "offscreen" });
+      sendResponse({ ok: true });
+      return;
+    }
+
     sendResponse({ ok: false, error: "Unknown extension command." });
   })().catch((error) => {
     sendResponse({

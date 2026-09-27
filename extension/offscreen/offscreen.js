@@ -6,13 +6,13 @@ let localStream;
 let activeRoomId;
 let callStatus = "idle";
 let myPeerId = null;
-let myUserId = null; // persistent caller/receiver ID loaded from storage
+let myUserId = null;   // persistent caller/receiver ID loaded from storage
 let iceServers = [];
 let activeRole;
 let callGeneration = 0;
 
 const peerConnections = new Map();
-const remoteAudioNodes = new Map();
+const remoteAudios = new Map();
 const pendingCandidates = new Map();
 
 // peerId → persistent userId (VINA-XXXXXXXX) received from the server
@@ -31,33 +31,32 @@ const vadHandles = new Map();
 let audioCtx = null;
 // Our own display name for this call
 let myDisplayName = null;
-let outputVolume = 1;
-let userMuted = false;
-let moderationMuted = false;
+// Current remote audio volume [0, 1] — applied to all remote Audio elements
+let remoteVolume = 1;
+// Set when the host has admin-muted us — blocks self-unmute
+let adminMutedByHost = false;
+// Peers that WE (as host) have admin-muted — peerId → true
+const peerAdminMutedByUs = new Set();
 
 /* ── VAD threshold ──────────────────────────────────────────────────────
  * RMS energy above this value (0-255 scale from AnalyserNode) = speaking.
  * 4.5 is sensitive enough for normal/quiet speech while filtering silence.
  * ─────────────────────────────────────────────────────────────────────── */
 const VAD_THRESHOLD = 4.5;
-const VAD_POLL_MS = 100;
+const VAD_POLL_MS   = 100;
 const VAD_HANGOVER_MS = 350;
 
 function buildPeerList() {
-  const isMuted =
-    userMuted ||
-    moderationMuted ||
-    (localStream?.getAudioTracks().every((t) => !t.enabled) ?? false);
-  const list = [
-    {
-      peerId: myPeerId,
-      userId: myUserId,
-      displayName: myDisplayName,
-      muted: isMuted,
-      speaking: !isMuted && speakingPeers.has("__local__"),
-      isLocal: true,
-    },
-  ];
+  const isMuted = localStream?.getAudioTracks().every((t) => !t.enabled) ?? false;
+  const list = [{
+    peerId: myPeerId,
+    userId: myUserId,
+    displayName: myDisplayName,
+    muted: isMuted,
+    speaking: !isMuted && speakingPeers.has("__local__"),
+    isLocal: true,
+    adminMuted: false,   // local user is never shown as admin-muted to themselves
+  }];
   for (const peerId of peerConnections.keys()) {
     list.push({
       peerId,
@@ -66,6 +65,7 @@ function buildPeerList() {
       muted: peerMutedStates.get(peerId) ?? false,
       speaking: speakingPeers.has(peerId),
       isLocal: false,
+      adminMuted: peerAdminMutedByUs.has(peerId),
     });
   }
   return list;
@@ -81,8 +81,7 @@ function publishStatus(status, detail = "") {
       detail,
       roomId: activeRoomId,
       userId: myUserId,
-      canModerate: activeRole === "host",
-      moderationMuted,
+      role: activeRole,
       muted:
         localStream?.getAudioTracks().every((track) => !track.enabled) ?? false,
       peers: buildPeerList(),
@@ -106,19 +105,6 @@ async function getOrCreateLocalStream() {
       },
       video: false,
     });
-    localStream.getAudioTracks().forEach((track) => {
-      track.enabled = !(userMuted || moderationMuted);
-    });
-    // Eagerly create and resume the AudioContext right after getUserMedia
-    // succeeds. Chrome treats the microphone grant as a user-media interaction
-    // so resume() is allowed here — before any remote tracks arrive.
-    // Without this, AudioContext stays suspended and remote audio is silent.
-    if (!audioCtx || audioCtx.state === "closed") {
-      audioCtx = new AudioContext();
-    }
-    if (audioCtx.state === "suspended") {
-      audioCtx.resume().catch(() => {});
-    }
     // Start local VAD so speaking state triggers for the user speaking
     startVad("__local__", localStream);
   }
@@ -164,10 +150,7 @@ async function flushIceCandidates(targetPeerId, connection, generation) {
   }
 }
 
-async function getOrCreatePeerConnection(
-  targetPeerId,
-  generation = callGeneration,
-) {
+async function getOrCreatePeerConnection(targetPeerId, generation = callGeneration) {
   if (peerConnections.has(targetPeerId)) {
     return peerConnections.get(targetPeerId);
   }
@@ -177,10 +160,7 @@ async function getOrCreatePeerConnection(
 
   // Negotiated data channel for peer-to-peer mute state sync
   try {
-    const dataChannel = connection.createDataChannel("vina-control", {
-      negotiated: true,
-      id: 0,
-    });
+    const dataChannel = connection.createDataChannel("vina-control", { negotiated: true, id: 0 });
     peerDataChannels.set(targetPeerId, dataChannel);
     dataChannel.onmessage = (event) => {
       try {
@@ -188,17 +168,50 @@ async function getOrCreatePeerConnection(
         if (msg.type === "mute-state") {
           peerMutedStates.set(targetPeerId, !!msg.muted);
           publishStatus(callStatus);
+        } else if (msg.type === "admin-mute") {
+          // Host commanded us to mute — force local tracks off and lock unmute
+          adminMutedByHost = true;
+          if (localStream) {
+            localStream.getAudioTracks().forEach((t) => { t.enabled = false; });
+            speakingPeers.delete("__local__");
+            for (const pc of peerConnections.values()) {
+              for (const sender of pc.getSenders()) {
+                if (sender.track?.kind === "audio") sender.track.enabled = false;
+              }
+            }
+            for (const dc of peerDataChannels.values()) {
+              if (dc.readyState === "open") {
+                try { dc.send(JSON.stringify({ type: "mute-state", muted: true })); } catch {}
+              }
+            }
+          }
+          publishStatus(callStatus);
+        } else if (msg.type === "admin-unmute") {
+          // Host released the mute lock — re-enable mic
+          adminMutedByHost = false;
+          if (localStream) {
+            localStream.getAudioTracks().forEach((t) => { t.enabled = true; });
+            for (const pc of peerConnections.values()) {
+              for (const sender of pc.getSenders()) {
+                if (sender.track?.kind === "audio") sender.track.enabled = true;
+              }
+            }
+            for (const dc of peerDataChannels.values()) {
+              if (dc.readyState === "open") {
+                try { dc.send(JSON.stringify({ type: "mute-state", muted: false })); } catch {}
+              }
+            }
+          }
+          publishStatus(callStatus);
+        } else if (msg.type === "admin-kick") {
+          // Host kicked us — defer so DC message handler finishes before teardown
+          setTimeout(() => endCall(), 50);
         }
       } catch {}
     };
     dataChannel.onopen = () => {
-      const isMuted =
-        localStream?.getAudioTracks().every((t) => !t.enabled) ?? false;
-      try {
-        dataChannel.send(
-          JSON.stringify({ type: "mute-state", muted: isMuted }),
-        );
-      } catch {}
+      const isMuted = localStream?.getAudioTracks().every((t) => !t.enabled) ?? false;
+      try { dataChannel.send(JSON.stringify({ type: "mute-state", muted: isMuted })); } catch {}
     };
   } catch {}
 
@@ -216,46 +229,25 @@ async function getOrCreatePeerConnection(
   connection.ontrack = (event) => {
     if (generation !== callGeneration) return;
     const remoteStream = event.streams[0];
+    let audioEl = remoteAudios.get(targetPeerId);
+    if (!audioEl) {
+      audioEl = new Audio();
+      audioEl.autoplay = true;
+      audioEl.playsInline = true;
+      audioEl.volume = remoteVolume;   // inherit current volume
+      remoteAudios.set(targetPeerId, audioEl);
+    }
+    audioEl.srcObject = remoteStream;
     // Start VAD immediately on the incoming stream
     startVad(targetPeerId, remoteStream);
-    try {
-      const previous = remoteAudioNodes.get(targetPeerId);
-      if (previous) {
-        previous.source.disconnect();
-        previous.gain.disconnect();
-      }
-      const context = audioCtx || new AudioContext();
-      audioCtx = context;
-      const source = context.createMediaStreamSource(remoteStream);
-      const gain = context.createGain();
-      gain.gain.value = outputVolume;
-      source.connect(gain);
-      gain.connect(context.destination);
-      remoteAudioNodes.set(targetPeerId, { source, gain });
-      context
-        .resume()
-        .then(() => {
-          if (generation === callGeneration && context.state !== "running") {
-            publishStatus(
-              "connected",
-              "Click the extension and use Enable audio if playback is blocked.",
-            );
-          }
-        })
-        .catch(() => {
-          if (generation === callGeneration) {
-            publishStatus(
-              "connected",
-              "Click the extension and use Enable audio if playback is blocked.",
-            );
-          }
-        });
-    } catch {
-      publishStatus(
-        "connected",
-        "Could not start audio playback. Reopen the extension and use Enable audio.",
-      );
-    }
+    audioEl
+      .play()
+      .catch(() => {
+        publishStatus(
+          "connected",
+          "Click the extension and use Enable audio if playback is blocked.",
+        );
+      });
   };
 
   connection.onicecandidate = ({ candidate }) => {
@@ -279,18 +271,14 @@ function stopVad(peerId) {
   const handle = vadHandles.get(peerId);
   if (handle) {
     clearInterval(handle.intervalId);
-    try {
-      handle.source.disconnect();
-    } catch {
-      /* ok */
-    }
+    try { handle.source.disconnect(); } catch { /* ok */ }
     vadHandles.delete(peerId);
   }
   speakingPeers.delete(peerId);
 }
 
 function startVad(peerId, stream) {
-  stopVad(peerId);
+  stopVad(peerId); // clear any previous analyser for this peer
   if (!stream || stream.getAudioTracks().length === 0) return;
   try {
     if (!audioCtx || audioCtx.state === "closed") {
@@ -299,7 +287,7 @@ function startVad(peerId, stream) {
     if (audioCtx.state === "suspended") {
       audioCtx.resume().catch(() => {});
     }
-    const source = audioCtx.createMediaStreamSource(stream);
+    const source   = audioCtx.createMediaStreamSource(stream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 256;
     source.connect(analyser);
@@ -308,26 +296,36 @@ function startVad(peerId, stream) {
     let lastSpokeAt = 0;
     const intervalId = setInterval(() => {
       analyser.getByteTimeDomainData(data);
+      // Compute RMS energy (128 = silence in time-domain representation)
       let sum = 0;
-      for (const value of data) {
-        const sample = value - 128;
-        sum += sample * sample;
-      }
+      for (const v of data) { const s = v - 128; sum += s * s; }
       const rms = Math.sqrt(sum / data.length);
-      const isMuted = peerId === "__local__" && (userMuted || moderationMuted);
-      const wasSpeaking = speakingPeers.has(peerId);
-      const now = Date.now();
-      if (!isMuted && rms > VAD_THRESHOLD) lastSpokeAt = now;
-      const isSpeaking = !isMuted && now - lastSpokeAt < VAD_HANGOVER_MS;
 
-      if (isSpeaking) speakingPeers.add(peerId);
-      else speakingPeers.delete(peerId);
-      if (speakingPeers.has(peerId) !== wasSpeaking) publishStatus(callStatus);
+      const isMuted = (peerId === "__local__") &&
+        (localStream?.getAudioTracks().every((t) => !t.enabled) ?? false);
+      const wasSpeaking = speakingPeers.has(peerId);
+
+      const now = Date.now();
+      if (!isMuted && rms > VAD_THRESHOLD) {
+        lastSpokeAt = now;
+      }
+
+      // Smooth hangover so indicator doesn't jitter/flicker between syllables
+      const isSpeaking = !isMuted && (now - lastSpokeAt < VAD_HANGOVER_MS);
+
+      if (isSpeaking) {
+        speakingPeers.add(peerId);
+      } else {
+        speakingPeers.delete(peerId);
+      }
+      if (speakingPeers.has(peerId) !== wasSpeaking) {
+        publishStatus(callStatus); // only re-publish when speaking state changes
+      }
     }, VAD_POLL_MS);
 
     vadHandles.set(peerId, { source, analyser, intervalId });
   } catch {
-    // AudioContext might not be available in offscreen; continue without VAD.
+    // AudioContext might not be available in offscreen — degrade gracefully
   }
 }
 
@@ -338,34 +336,24 @@ function closePeer(targetPeerId) {
   peerMutedStates.delete(targetPeerId);
   const dc = peerDataChannels.get(targetPeerId);
   if (dc) {
-    try {
-      dc.close();
-    } catch {
-      /* ok */
-    }
+    try { dc.close(); } catch { /* ok */ }
     peerDataChannels.delete(targetPeerId);
   }
   const pc = peerConnections.get(targetPeerId);
   if (pc) {
     pc.ontrack = null;
     pc.onicecandidate = null;
-    pc.onconnectionstatechange = null; // prevent stale callbacks after close
+    pc.onconnectionstatechange = null;  // prevent stale callbacks after close
     pc.close();
     peerConnections.delete(targetPeerId);
   }
-  const audioNodes = remoteAudioNodes.get(targetPeerId);
-  if (audioNodes) {
-    try {
-      audioNodes.source.disconnect();
-    } catch {
-      /* ok */
-    }
-    try {
-      audioNodes.gain.disconnect();
-    } catch {
-      /* ok */
-    }
-    remoteAudioNodes.delete(targetPeerId);
+  const audio = remoteAudios.get(targetPeerId);
+  if (audio) {
+    audio.autoplay = false;
+    audio.pause();
+    audio.srcObject = null;
+    try { audio.load(); } catch { /* ok - fully resets the media pipeline */ }
+    remoteAudios.delete(targetPeerId);
   }
   pendingCandidates.delete(targetPeerId);
 }
@@ -398,47 +386,26 @@ async function startCall({ roomId, serverUrl, role, userId, displayName }) {
     !["ws:", "wss:"].includes(endpoint.protocol) ||
     (endpoint.protocol === "ws:" && !LOCAL_HOSTS.has(endpoint.hostname))
   ) {
-    throw new Error(
-      "Use WSS for remote signaling servers; WS is allowed only on localhost.",
-    );
+    throw new Error("Use WSS for remote signaling servers; WS is allowed only on localhost.");
   }
 
   activeRoomId = roomId;
   activeRole = role;
-  userMuted = false;
-  moderationMuted = false;
-  try {
-    const stored = await chrome.storage.local.get("outputVolume");
-    const volumePercent = Number(stored.outputVolume);
-    if (Number.isFinite(volumePercent)) {
-      outputVolume = Math.max(0, Math.min(200, volumePercent)) / 100;
-    }
-  } catch {
-    /* ok */
-  }
   myUserId = userId || null;
   if (!myUserId) {
     try {
       const stored = await chrome.storage.local.get("userId");
       myUserId = stored?.userId || null;
-    } catch {
-      /* ok */
-    }
+    } catch { /* ok */ }
   }
-  myDisplayName =
-    typeof displayName === "string" && displayName.trim()
-      ? displayName.trim()
-      : null;
+  myDisplayName = (typeof displayName === "string" && displayName.trim())
+    ? displayName.trim() : null;
   if (!myDisplayName) {
     try {
       const stored = await chrome.storage.local.get("displayName");
-      myDisplayName =
-        typeof stored?.displayName === "string" && stored.displayName.trim()
-          ? stored.displayName.trim()
-          : null;
-    } catch {
-      /* ok */
-    }
+      myDisplayName = (typeof stored?.displayName === "string" && stored.displayName.trim())
+        ? stored.displayName.trim() : null;
+    } catch { /* ok */ }
   }
   const generation = ++callGeneration;
   pendingCandidates.clear();
@@ -449,28 +416,23 @@ async function startCall({ roomId, serverUrl, role, userId, displayName }) {
     socket = callSocket;
     callSocket.addEventListener("open", () => {
       if (generation === callGeneration) {
-        callSocket.send(
-          JSON.stringify({
-            type: "join",
-            roomId,
-            userId: myUserId,
-            displayName: myDisplayName,
-          }),
-        );
+        callSocket.send(JSON.stringify({
+          type: "join",
+          roomId,
+          userId: myUserId,
+          displayName: myDisplayName,
+        }));
       }
     });
     let messageQueue = Promise.resolve();
     callSocket.addEventListener("message", ({ data }) => {
-      messageQueue = messageQueue
-        .then(() => {
-          if (generation === callGeneration)
-            return handleServerMessage(data, generation);
-        })
-        .catch(async (error) => {
-          if (generation !== callGeneration) return;
-          await endCall();
-          publishStatus("error", error.message);
-        });
+      messageQueue = messageQueue.then(() => {
+        if (generation === callGeneration) return handleServerMessage(data, generation);
+      }).catch(async (error) => {
+        if (generation !== callGeneration) return;
+        await endCall();
+        publishStatus("error", error.message);
+      });
     });
     callSocket.addEventListener("error", async () => {
       if (generation !== callGeneration) return;
@@ -480,12 +442,12 @@ async function startCall({ roomId, serverUrl, role, userId, displayName }) {
         "Could not reach the signaling server. Check that it is running.",
       );
     });
-    callSocket.addEventListener("close", async ({ code }) => {
-      if (generation !== callGeneration) return;
-      if (code === 4001) {
-        await endCall();
-        publishStatus("ended", "You were removed by the room host.");
-      } else if (callStatus !== "ended" && callStatus !== "error") {
+    callSocket.addEventListener("close", () => {
+      if (
+        generation === callGeneration &&
+        callStatus !== "ended" &&
+        callStatus !== "error"
+      ) {
         publishStatus("error", "Signaling connection closed.");
       }
     });
@@ -511,13 +473,10 @@ async function handleServerMessage(data, generation) {
 
   if (message.type === "joined") {
     if (!Array.isArray(message.iceServers) || message.iceServers.length === 0) {
-      throw new Error(
-        "The signaling server did not provide ICE configuration.",
-      );
+      throw new Error("The signaling server did not provide ICE configuration.");
     }
     iceServers = message.iceServers;
     myPeerId = message.peerId;
-    activeRole = message.role || activeRole;
 
     publishStatus("requesting-microphone", "Accessing microphone...");
     await getOrCreateLocalStream();
@@ -526,11 +485,10 @@ async function handleServerMessage(data, generation) {
     // peers is now [{peerId, userId, displayName}] from the updated server
     const existingPeers = Array.isArray(message.peers) ? message.peers : [];
     for (const peerInfo of existingPeers) {
-      const peerId = typeof peerInfo === "object" ? peerInfo.peerId : peerInfo;
-      const userId = typeof peerInfo === "object" ? peerInfo.userId : null;
-      const displayName =
-        typeof peerInfo === "object" ? peerInfo.displayName : null;
-      if (userId) peerUserIds.set(peerId, userId);
+      const peerId      = typeof peerInfo === "object" ? peerInfo.peerId      : peerInfo;
+      const userId      = typeof peerInfo === "object" ? peerInfo.userId      : null;
+      const displayName = typeof peerInfo === "object" ? peerInfo.displayName : null;
+      if (userId)      peerUserIds.set(peerId, userId);
       if (displayName) peerDisplayNames.set(peerId, displayName);
       const pc = await getOrCreatePeerConnection(peerId, generation);
       if (!pc || generation !== callGeneration) return;
@@ -544,7 +502,7 @@ async function handleServerMessage(data, generation) {
     updateOverallStatus();
   } else if (message.type === "peer-joined") {
     const peerId = message.peerId || "default";
-    if (message.userId) peerUserIds.set(peerId, message.userId);
+    if (message.userId)      peerUserIds.set(peerId, message.userId);
     if (message.displayName) peerDisplayNames.set(peerId, message.displayName);
     await getOrCreatePeerConnection(peerId, generation);
     updateOverallStatus();
@@ -587,36 +545,6 @@ async function handleServerMessage(data, generation) {
     if (message.role) activeRole = message.role;
     closePeer(peerId);
     updateOverallStatus();
-  } else if (message.type === "moderation") {
-    if (message.action === "mute" || message.action === "unmute") {
-      moderationMuted = message.action === "mute";
-      const muted = userMuted || moderationMuted;
-      localStream?.getAudioTracks().forEach((track) => {
-        track.enabled = !muted;
-      });
-      if (muted) speakingPeers.delete("__local__");
-      for (const pc of peerConnections.values()) {
-        for (const sender of pc.getSenders()) {
-          if (sender.track?.kind === "audio") sender.track.enabled = !muted;
-        }
-      }
-      for (const dc of peerDataChannels.values()) {
-        if (dc.readyState === "open") {
-          try {
-            dc.send(JSON.stringify({ type: "mute-state", muted }));
-          } catch {}
-        }
-      }
-      publishStatus(
-        callStatus,
-        moderationMuted ? "Your microphone was muted by the room host." : "",
-      );
-    }
-  } else if (message.type === "moderation-error") {
-    publishStatus(
-      callStatus,
-      message.message || "The room control could not be applied.",
-    );
   } else if (message.type === "error") {
     throw new Error(message.message);
   }
@@ -633,7 +561,7 @@ async function endCall() {
     closePeer(targetPeerId);
   }
 
-  // Safety net: stop any remote audio routes that fell out of sync with
+  // Safety net: stop any remote audio elements that fell out of sync with
   // peerConnections (e.g. from a failed-then-removed peer).
   stopVad("__local__");
   for (const peerId of [...vadHandles.keys()]) stopVad(peerId);
@@ -641,27 +569,17 @@ async function endCall() {
   peerUserIds.clear();
   peerDisplayNames.clear();
   for (const dc of peerDataChannels.values()) {
-    try {
-      dc.close();
-    } catch {
-      /* ok */
-    }
+    try { dc.close(); } catch { /* ok */ }
   }
   peerDataChannels.clear();
   peerMutedStates.clear();
-  for (const audioNodes of remoteAudioNodes.values()) {
-    try {
-      audioNodes.source.disconnect();
-    } catch {
-      /* ok */
-    }
-    try {
-      audioNodes.gain.disconnect();
-    } catch {
-      /* ok */
-    }
+  for (const audio of remoteAudios.values()) {
+    audio.autoplay = false;
+    audio.pause();
+    audio.srcObject = null;
+    try { audio.load(); } catch { /* ok */ }
   }
-  remoteAudioNodes.clear();
+  remoteAudios.clear();
 
   localStream?.getTracks().forEach((track) => track.stop());
   localStream = null;
@@ -672,8 +590,8 @@ async function endCall() {
   myPeerId = null;
   myUserId = null;
   myDisplayName = null;
-  userMuted = false;
-  moderationMuted = false;
+  adminMutedByHost = false;       // clear host-mute lock for next call
+  peerAdminMutedByUs.clear();     // clear admin-mute tracking for next call
   publishStatus("ended");
 }
 
@@ -689,8 +607,15 @@ chrome.runtime.onMessage.addListener((message) => {
     message.action === "toggle-mute" &&
     localStream
   ) {
-    userMuted = !userMuted;
-    const shouldMute = userMuted || moderationMuted;
+    // Block self-unmute when admin has locked the mic
+    if (adminMutedByHost) {
+      publishStatus(callStatus); // re-sync UI so muted indicator stays correct
+      return;
+    }
+
+    // Determine target state: if ALL tracks are enabled → mute; else → unmute.
+    const allEnabled = localStream.getAudioTracks().every((t) => t.enabled);
+    const shouldMute = allEnabled;
 
     // 1. Set enabled on the MediaStreamTrack (controls what enters the encoder).
     localStream.getAudioTracks().forEach((track) => {
@@ -715,40 +640,51 @@ chrome.runtime.onMessage.addListener((message) => {
     // 4. Broadcast mute state across peer data channels
     for (const dc of peerDataChannels.values()) {
       if (dc.readyState === "open") {
-        try {
-          dc.send(JSON.stringify({ type: "mute-state", muted: shouldMute }));
-        } catch {}
+        try { dc.send(JSON.stringify({ type: "mute-state", muted: shouldMute })); } catch {}
       }
     }
 
     publishStatus(callStatus);
-  } else if (
-    message.type === "CALL_ACTION" &&
-    message.action === "set-volume"
-  ) {
-    const requestedVolume = Number(message.volume);
-    if (Number.isFinite(requestedVolume)) {
-      outputVolume = Math.max(0, Math.min(2, requestedVolume));
-      for (const { gain } of remoteAudioNodes.values()) {
-        gain.gain.setTargetAtTime(outputVolume, audioCtx.currentTime, 0.02);
-      }
-    }
-  } else if (message.type === "CALL_ACTION" && message.action === "moderate") {
-    if (activeRole !== "host") {
-      publishStatus(callStatus, "Only the room host can control participants.");
-    } else if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(
-        JSON.stringify({
-          type: "moderate",
-          action: message.moderation,
-          targetPeerId: message.targetPeerId,
-        }),
-      );
-    }
   } else if (message.type === "STATUS_QUERY") {
     publishStatus(callStatus);
   } else if (message.type === "ENABLE_AUDIO") {
-    audioCtx?.resume().catch(() => {});
+    for (const audioEl of remoteAudios.values()) {
+      audioEl.play().catch(() => {});
+    }
     publishStatus(callStatus);
+  } else if (message.type === "SET_VOLUME") {
+    // Clamp to [0, 1] for safety
+    remoteVolume = Math.min(1, Math.max(0, Number(message.volume) || 0));
+    for (const audioEl of remoteAudios.values()) {
+      audioEl.volume = remoteVolume;
+    }
+  } else if (message.type === "ADMIN_MUTE_PEER" && message.peerId) {
+    // Track and send admin-mute via data channel
+    peerAdminMutedByUs.add(message.peerId);
+    const dc = peerDataChannels.get(message.peerId);
+    if (dc?.readyState === "open") {
+      try { dc.send(JSON.stringify({ type: "admin-mute" })); } catch {}
+    }
+    publishStatus(callStatus);
+  } else if (message.type === "ADMIN_UNMUTE_PEER" && message.peerId) {
+    // Release admin-mute lock on the peer
+    peerAdminMutedByUs.delete(message.peerId);
+    const dc = peerDataChannels.get(message.peerId);
+    if (dc?.readyState === "open") {
+      try { dc.send(JSON.stringify({ type: "admin-unmute" })); } catch {}
+    }
+    publishStatus(callStatus);
+  } else if (message.type === "ADMIN_KICK_PEER" && message.peerId) {
+    // Tell the peer to leave, then close our side
+    const dc = peerDataChannels.get(message.peerId);
+    if (dc?.readyState === "open") {
+      try { dc.send(JSON.stringify({ type: "admin-kick" })); } catch {}
+    }
+    // Give the DC message a moment to transmit before tearing down
+    setTimeout(() => {
+      peerAdminMutedByUs.delete(message.peerId);
+      closePeer(message.peerId);
+      updateOverallStatus();
+    }, 300);
   }
 });
