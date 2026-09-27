@@ -3,7 +3,7 @@
   "name": "Voice Chat",
   "version": "1.0.0",
   "description": "Private voice rooms with up to 10 participants while you browse.",
-  "permissions": ["offscreen", "tabs", "storage"],
+  "permissions": ["offscreen", "tabs", "storage", "microphone"],
   "host_permissions": [
     "http://localhost:3000/*",
     "http://127.0.0.1:3000/*",

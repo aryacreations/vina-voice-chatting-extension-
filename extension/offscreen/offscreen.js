@@ -109,6 +109,16 @@ async function getOrCreateLocalStream() {
     localStream.getAudioTracks().forEach((track) => {
       track.enabled = !(userMuted || moderationMuted);
     });
+    // Eagerly create and resume the AudioContext right after getUserMedia
+    // succeeds. Chrome treats the microphone grant as a user-media interaction
+    // so resume() is allowed here — before any remote tracks arrive.
+    // Without this, AudioContext stays suspended and remote audio is silent.
+    if (!audioCtx || audioCtx.state === "closed") {
+      audioCtx = new AudioContext();
+    }
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume().catch(() => {});
+    }
     // Start local VAD so speaking state triggers for the user speaking
     startVad("__local__", localStream);
   }
