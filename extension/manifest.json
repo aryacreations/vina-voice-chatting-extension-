@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Voice Chat",
+  "name": "VINA",
   "version": "1.0.0",
   "description": "Private voice rooms with up to 10 participants while you browse.",
   "permissions": ["offscreen", "tabs", "storage", "microphone"],

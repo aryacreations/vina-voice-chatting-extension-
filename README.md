@@ -2,12 +2,13 @@
 
 A Chrome Manifest V3 extension for private voice rooms with up to 10 participants. The extension captures microphone audio and negotiates a WebRTC connection with each other participant. A small Node.js WebSocket service coordinates room membership and exchanges WebRTC session descriptions and ICE candidates. Media travels directly between peers when possible; if their networks cannot connect directly, Coturn can relay the encrypted WebRTC media.
 
-This repository contains the extension, signaling service, tests, and a self-hosted Docker Compose deployment scaffold using Caddy and Coturn. The scaffold is not a deployed service: an operator must provide a domain, server, DNS, secrets, firewall access, and a stable extension ID.
+This repository contains the VINA landing page and downloadable extension package in `frontend/`, the Chrome extension, signaling service, tests, and a self-hosted Docker Compose deployment scaffold using Caddy and Coturn. The scaffold is not a deployed service: an operator must provide a domain, server, DNS, secrets, firewall access, and a stable extension ID.
 
 ## Contents
 
 - [Architecture](#architecture)
 - [Features and scope](#features-and-scope)
+- [Landing page](#landing-page)
 - [Requirements](#requirements)
 - [Run locally](#run-locally)
 - [Load the extension](#load-the-extension)
@@ -57,6 +58,26 @@ The popup is the short-lived control surface. The Manifest V3 service worker cre
 
 This is a small peer-to-peer voice room, not a large-scale group chat, identity system, or hosted product. Room codes are bearer invitations: anyone who learns a code can try to join its room.
 
+## Landing page
+
+The static VINA website is self-contained in `frontend/`:
+
+- `frontend/index.html` contains the product overview, features, English Chrome setup steps, tutorial slot, and developer credits.
+- `frontend/styles.css` contains the responsive retro-style layout.
+- `frontend/script.js` handles the tutorial player's placeholder state.
+- `frontend/vina-extension.zip` is the extension package linked by the website's download buttons.
+
+To preview the page, open `frontend/index.html` in a browser. Alternatively, run a static server from the frontend directory:
+
+```powershell
+Set-Location frontend
+python -m http.server 8000
+```
+
+Then open `http://localhost:8000`. The page has no frontend build step. Its ZIP buttons download `vina-extension.zip`; extract that archive before selecting its folder with Chrome's **Load unpacked** control.
+
+To add the tutorial video, place the MP4 at `frontend/assets/vina-how-to-use.mp4` and set that path as the `src` on the `<video>` element in `frontend/index.html`. The placeholder is hidden when video data loads. The credit section links to Sammer Chauhan's and Aryan Rajput's GitHub and LinkedIn profiles.
+
 ## Requirements
 
 For local development:
@@ -98,7 +119,7 @@ The development server uses the public Google STUN endpoint by default and has n
 1. Start the signaling server as described above.
 2. Open `chrome://extensions` in Chrome and enable **Developer mode**.
 3. Select **Load unpacked** and choose this repository's `extension` directory.
-4. Open the Voice Chat popup. For a local server on the same computer, keep the URL as `ws://localhost:3000/signal`.
+4. Open the VINA popup. For a local server on the same computer, keep the URL as `ws://localhost:3000/signal`.
 5. Participant A selects **Create room**, then shares the code privately.
 6. Participant B enters the code and selects **Join**.
 7. Both participants approve Chrome's microphone prompt. Use the microphone button to mute/unmute and **Leave call** to end the session.
