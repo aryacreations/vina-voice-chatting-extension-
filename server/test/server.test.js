@@ -62,11 +62,13 @@ test("joins two peers and relays offers only to the other peer", async (context)
   assert.equal(guestJoined.role, "guest");
   assert.equal(guestJoined.peerPresent, true);
   assert.ok(guestJoined.peerId);
-  assert.deepEqual(guestJoined.peers, [{
-    peerId: hostJoined.peerId,
-    userId: null,
-    displayName: null,
-  }]);
+  assert.deepEqual(guestJoined.peers, [
+    {
+      peerId: hostJoined.peerId,
+      userId: null,
+      displayName: null,
+    },
+  ]);
 
   const hostPeerJoined = await nextMessage(host);
   assert.equal(hostPeerJoined.type, "peer-joined");
@@ -81,9 +83,7 @@ test("joins two peers and relays offers only to the other peer", async (context)
 });
 
 test("rejects an 11th participant in a full room (10 participant limit)", async (context) => {
-  const peers = await Promise.all(
-    Array.from({ length: 11 }, () => connect())
-  );
+  const peers = await Promise.all(Array.from({ length: 11 }, () => connect()));
   context.after(() => peers.forEach((peer) => peer.close()));
 
   for (let i = 0; i < 10; i++) {
@@ -102,7 +102,9 @@ test("enforces the configured room limit", async (context) => {
   const capped = createSignalingServer({
     env: { NODE_ENV: "test", MAX_ROOMS: "1" },
   });
-  await new Promise((resolve) => capped.httpServer.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) =>
+    capped.httpServer.listen(0, "127.0.0.1", resolve),
+  );
   const cappedAddress = `ws://127.0.0.1:${capped.httpServer.address().port}/signal`;
   context.after(() => capped.close());
   const peers = await Promise.all([
@@ -154,6 +156,60 @@ test("promotes the remaining participant when the room creator leaves", async (c
   assert.equal(guestPeerJoined.peerId, replacementJoined.peerId);
 });
 
+test("allows only the host to mute, unmute, and remove room participants", async (context) => {
+  const host = await connect();
+  const guest = await connect();
+  context.after(() => {
+    host.close();
+    guest.close();
+  });
+
+  host.send(JSON.stringify({ type: "join", roomId: "moderation-room" }));
+  const hostJoined = await nextMessage(host);
+  guest.send(JSON.stringify({ type: "join", roomId: "moderation-room" }));
+  const guestJoined = await nextMessage(guest);
+  await nextMessage(host);
+
+  guest.send(
+    JSON.stringify({
+      type: "moderate",
+      action: "kick",
+      targetPeerId: hostJoined.peerId,
+    }),
+  );
+  assert.equal((await nextMessage(guest)).type, "moderation-error");
+
+  for (const action of ["mute", "unmute"]) {
+    const moderation = nextMessage(guest);
+    host.send(
+      JSON.stringify({
+        type: "moderate",
+        action,
+        targetPeerId: guestJoined.peerId,
+      }),
+    );
+    const result = await moderation;
+    assert.equal(result.type, "moderation");
+    assert.equal(result.action, action);
+  }
+
+  const kickMessage = nextMessage(guest);
+  const closeCode = new Promise((resolve) =>
+    guest.once("close", (code) => resolve(code)),
+  );
+  const peerLeft = nextMessage(host);
+  host.send(
+    JSON.stringify({
+      type: "moderate",
+      action: "kick",
+      targetPeerId: guestJoined.peerId,
+    }),
+  );
+  assert.equal((await kickMessage).action, "kick");
+  assert.equal(await closeCode, 4001);
+  assert.equal((await peerLeft).type, "peer-left");
+});
+
 test("rejects JSON null without crashing the signaling server", async (context) => {
   const peer = await connect();
   context.after(() => peer.close());
@@ -168,7 +224,10 @@ test("rejects JSON null without crashing the signaling server", async (context) 
 test("issues short-lived Coturn REST credentials without exposing the shared secret", () => {
   const config = {
     stunUrls: [],
-    turnUrls: ["turn:turn.example.test:3478?transport=udp", "turns:turn.example.test:5349?transport=tcp"],
+    turnUrls: [
+      "turn:turn.example.test:3478?transport=udp",
+      "turns:turn.example.test:5349?transport=tcp",
+    ],
     turnSecret: "test-only-secret-that-is-long-enough",
     turnCredentialTtlSeconds: 600,
   };
@@ -193,31 +252,37 @@ test("requires origins and TURN configuration when NODE_ENV is production", () =
     /ALLOWED_ORIGINS/,
   );
   assert.throws(
-    () => createSignalingServer({
-      env: { NODE_ENV: "production", ALLOWED_ORIGINS: "https://voice.example.test" },
-    }),
+    () =>
+      createSignalingServer({
+        env: {
+          NODE_ENV: "production",
+          ALLOWED_ORIGINS: "https://voice.example.test",
+        },
+      }),
     /TURN_URLS and TURN_SHARED_SECRET/,
   );
   assert.throws(
-    () => createSignalingServer({
-      env: {
-        NODE_ENV: "production",
-        ALLOWED_ORIGINS: "http://voice.example.test",
-        TURN_URLS: "turn:turn.example.test:3478?transport=udp",
-        TURN_SHARED_SECRET: "test-only-secret-that-is-long-enough",
-      },
-    }),
+    () =>
+      createSignalingServer({
+        env: {
+          NODE_ENV: "production",
+          ALLOWED_ORIGINS: "http://voice.example.test",
+          TURN_URLS: "turn:turn.example.test:3478?transport=udp",
+          TURN_SHARED_SECRET: "test-only-secret-that-is-long-enough",
+        },
+      }),
     /HTTPS or valid Chrome extension origins/,
   );
   assert.throws(
-    () => createSignalingServer({
-      env: {
-        NODE_ENV: "production",
-        ALLOWED_ORIGINS: "https://voice.example.test",
-        TURN_URLS: "turn:turn.example.test:3478?transport=udp",
-        TURN_SHARED_SECRET: "weak",
-      },
-    }),
+    () =>
+      createSignalingServer({
+        env: {
+          NODE_ENV: "production",
+          ALLOWED_ORIGINS: "https://voice.example.test",
+          TURN_URLS: "turn:turn.example.test:3478?transport=udp",
+          TURN_SHARED_SECRET: "weak",
+        },
+      }),
     /at least 32 bytes/,
   );
 });
@@ -232,7 +297,9 @@ test("enforces configured browser origins on the WebSocket upgrade", async (cont
       TURN_SHARED_SECRET: "test-only-secret-that-is-long-enough",
     },
   });
-  await new Promise((resolve) => restricted.httpServer.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) =>
+    restricted.httpServer.listen(0, "127.0.0.1", resolve),
+  );
   const restrictedAddress = `ws://127.0.0.1:${restricted.httpServer.address().port}/signal`;
   context.after(() => restricted.close());
 
@@ -258,7 +325,9 @@ test("enforces configured browser origins on the WebSocket upgrade", async (cont
   const joined = await nextMessage(allowed);
   const turnServer = joined.iceServers.find((iceServer) => iceServer.username);
   assert.ok(turnServer);
-  assert.deepEqual(turnServer.urls, ["turn:turn.example.test:3478?transport=udp"]);
+  assert.deepEqual(turnServer.urls, [
+    "turn:turn.example.test:3478?transport=udp",
+  ]);
   assert.equal(
     turnServer.credential.includes("test-only-secret-that-is-long-enough"),
     false,
@@ -271,20 +340,26 @@ test("rejects oversized or malformed signaling payload fields", async (context) 
   host.send(JSON.stringify({ type: "join", roomId: "schema-room" }));
   await nextMessage(host);
 
-  host.send(JSON.stringify({
-    type: "offer",
-    payload: { type: "offer", sdp: "x".repeat(48 * 1024 + 1) },
-  }));
+  host.send(
+    JSON.stringify({
+      type: "offer",
+      payload: { type: "offer", sdp: "x".repeat(48 * 1024 + 1) },
+    }),
+  );
   assert.equal((await nextMessage(host)).type, "error");
-  host.send(JSON.stringify({
-    type: "ice-candidate",
-    payload: { candidate: "candidate", unexpected: true },
-  }));
+  host.send(
+    JSON.stringify({
+      type: "ice-candidate",
+      payload: { candidate: "candidate", unexpected: true },
+    }),
+  );
   assert.equal((await nextMessage(host)).type, "error");
-  host.send(JSON.stringify({
-    type: "ice-candidate",
-    payload: { candidate: "candidate" },
-    roomId: "different-room",
-  }));
+  host.send(
+    JSON.stringify({
+      type: "ice-candidate",
+      payload: { candidate: "candidate" },
+      roomId: "different-room",
+    }),
+  );
   assert.equal((await nextMessage(host)).type, "error");
 });

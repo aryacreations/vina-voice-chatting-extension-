@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Voice Chat",
   "version": "1.0.0",
-  "description": "Private one-to-one voice rooms while you browse.",
+  "description": "Private voice rooms with up to 10 participants while you browse.",
   "permissions": ["offscreen", "tabs", "storage"],
   "host_permissions": [
     "http://localhost:3000/*",

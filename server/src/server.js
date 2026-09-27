@@ -31,7 +31,9 @@ function readConfig(env = process.env) {
     throw new Error("ALLOWED_ORIGINS must be configured in production.");
   }
   if (production && turnSecret && Buffer.byteLength(turnSecret) < 32) {
-    throw new Error("TURN_SHARED_SECRET must contain at least 32 bytes in production.");
+    throw new Error(
+      "TURN_SHARED_SECRET must contain at least 32 bytes in production.",
+    );
   }
   for (const origin of allowedOrigins) {
     if (/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) continue;
@@ -46,7 +48,9 @@ function readConfig(env = process.env) {
       parsed.origin !== origin ||
       (production && parsed.protocol !== "https:")
     ) {
-      throw new Error("ALLOWED_ORIGINS must contain HTTPS or valid Chrome extension origins in production.");
+      throw new Error(
+        "ALLOWED_ORIGINS must contain HTTPS or valid Chrome extension origins in production.",
+      );
     }
   }
   if (
@@ -59,13 +63,19 @@ function readConfig(env = process.env) {
       }
     })
   ) {
-    throw new Error("TURN_URLS must contain at most eight valid turn: or turns: URLs.");
+    throw new Error(
+      "TURN_URLS must contain at most eight valid turn: or turns: URLs.",
+    );
   }
   if (Boolean(turnUrls.length) !== Boolean(turnSecret)) {
-    throw new Error("TURN_URLS and TURN_SHARED_SECRET must be configured together.");
+    throw new Error(
+      "TURN_URLS and TURN_SHARED_SECRET must be configured together.",
+    );
   }
   if (production && turnUrls.length === 0) {
-    throw new Error("TURN_URLS and TURN_SHARED_SECRET are required in production.");
+    throw new Error(
+      "TURN_URLS and TURN_SHARED_SECRET are required in production.",
+    );
   }
 
   return {
@@ -84,7 +94,11 @@ function readConfig(env = process.env) {
     ),
     maxRooms: positiveInteger(env.MAX_ROOMS, 5000, 100000),
     maxConnections: positiveInteger(env.MAX_CONNECTIONS, 1000, 10000),
-    heartbeatIntervalMs: positiveInteger(env.HEARTBEAT_INTERVAL_MS, 30000, 300000),
+    heartbeatIntervalMs: positiveInteger(
+      env.HEARTBEAT_INTERVAL_MS,
+      30000,
+      300000,
+    ),
   };
 }
 
@@ -213,7 +227,7 @@ function createSignalingServer(options = {}) {
     });
     socket.roomId = null;
     socket.role = null;
-    socket.userId = null;   // persistent caller ID sent by the extension
+    socket.userId = null; // persistent caller ID sent by the extension
 
     socket.on("message", (rawMessage, isBinary) => {
       if (isBinary) {
@@ -238,6 +252,7 @@ function createSignalingServer(options = {}) {
           "payload",
           "targetPeerId",
           "fromPeerId",
+          "action",
         ])
       ) {
         send(socket, { type: "error", message: "Invalid signaling message." });
@@ -283,11 +298,16 @@ function createSignalingServer(options = {}) {
         socket.roomId = message.roomId;
         socket.role = room.length === 0 ? "host" : "guest";
         // Store the persistent caller ID (may be absent for older clients)
-        socket.userId = (typeof message.userId === "string" && message.userId.length <= 32)
-          ? message.userId : null;
+        socket.userId =
+          typeof message.userId === "string" && message.userId.length <= 32
+            ? message.userId
+            : null;
         // Store the human-readable display name
-        socket.displayName = (typeof message.displayName === "string" && message.displayName.trim().length > 0)
-          ? message.displayName.trim().slice(0, 50) : null;
+        socket.displayName =
+          typeof message.displayName === "string" &&
+          message.displayName.trim().length > 0
+            ? message.displayName.trim().slice(0, 50)
+            : null;
         const existingPeers = room.map((peer) => ({
           peerId: peer.peerId,
           userId: peer.userId,
@@ -326,7 +346,43 @@ function createSignalingServer(options = {}) {
         return;
       }
 
+      if (message.type === "moderate") {
+        const room = rooms.get(socket.roomId) || [];
+        if (
+          socket.role !== "host" ||
+          !hasOnlyKeys(message, ["type", "action", "targetPeerId"]) ||
+          !["mute", "unmute", "kick"].includes(message.action) ||
+          typeof message.targetPeerId !== "string"
+        ) {
+          send(socket, {
+            type: "moderation-error",
+            message: "Only the room host can mute or remove participants.",
+          });
+          return;
+        }
+
+        const target = room.find(
+          (peer) => peer.peerId === message.targetPeerId,
+        );
+        if (!target || target === socket) {
+          send(socket, {
+            type: "moderation-error",
+            message: "That participant is no longer in the room.",
+          });
+          return;
+        }
+
+        if (message.action === "kick") {
+          send(target, { type: "moderation", action: "kick" });
+          target.close(4001, "Removed by the room host");
+        } else {
+          send(target, { type: "moderation", action: message.action });
+        }
+        return;
+      }
+
       if (
+        !hasOnlyKeys(message, ["type", "payload", "targetPeerId"]) ||
         !isValidSignal(message.type, message.payload)
       ) {
         send(socket, { type: "error", message: "Invalid signaling message." });
@@ -335,7 +391,9 @@ function createSignalingServer(options = {}) {
 
       const room = rooms.get(socket.roomId) || [];
       if (message.targetPeerId) {
-        const target = room.find((peer) => peer.peerId === message.targetPeerId);
+        const target = room.find(
+          (peer) => peer.peerId === message.targetPeerId,
+        );
         if (target && target !== socket) {
           send(target, {
             type: message.type,
@@ -414,9 +472,7 @@ if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
   const host = process.env.HOST || "0.0.0.0";
   httpServer.listen(port, host, () => {
-    console.log(
-      `Voice chat signaling server listening on ${host}:${port}`,
-    );
+    console.log(`Voice chat signaling server listening on ${host}:${port}`);
   });
 
   // ── Keep-alive self-ping ────────────────────────────────────────────────────
@@ -425,11 +481,15 @@ if (require.main === module) {
   // The server pings itself every 14 minutes using only Node built-ins.
   const KEEPALIVE_URL = process.env.KEEPALIVE_URL;
   if (KEEPALIVE_URL) {
-    const { get } = require(KEEPALIVE_URL.startsWith("https") ? "node:https" : "node:http");
+    const { get } = require(
+      KEEPALIVE_URL.startsWith("https") ? "node:https" : "node:http",
+    );
     const FOURTEEN_MINUTES = 14 * 60 * 1000;
     const keepAliveTimer = setInterval(() => {
       get(KEEPALIVE_URL, (res) => {
-        console.log(`[keepalive] ${new Date().toISOString()} → ${res.statusCode} ${KEEPALIVE_URL}`);
+        console.log(
+          `[keepalive] ${new Date().toISOString()} → ${res.statusCode} ${KEEPALIVE_URL}`,
+        );
       }).on("error", (err) => {
         console.error(`[keepalive] ping failed: ${err.message}`);
       });

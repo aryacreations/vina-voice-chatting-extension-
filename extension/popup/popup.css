@@ -121,6 +121,10 @@ input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(29, 113, 92
 .call-controls { display: flex; gap: 8px; margin-top: 10px; }
 .control-button { width: 38px; height: 38px; }
 .control-button.is-muted { border-color: #e8b5a8; background: #f8e6e1; color: #9e3929; }
+.volume-control { margin-top: 10px; }
+.volume-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; color: var(--muted); font-size: 10px; }
+.volume-heading output { color: var(--green-dark); font: 700 10px 'Consolas', monospace; }
+.volume-control input[type='range'] { display: block; height: 22px; padding: 0; border: 0; background: transparent; accent-color: var(--green); cursor: pointer; }
 .text-button { border: 0; padding: 4px 0; background: none; color: var(--green); font-size: 10px; font-weight: 800; }
 .toast { min-height: 13px; margin: 6px 0 0; color: var(--coral); font-size: 10px; }
 footer { padding-top: 8px; border-top: 1px solid var(--line); color: #819087; font: 10px 'Consolas', monospace; }
@@ -271,8 +275,13 @@ footer { padding-top: 8px; border-top: 1px solid var(--line); color: #819087; fo
 .badge { padding: 2px 5px; border-radius: 3px; font: 600 8px 'Consolas', monospace; letter-spacing: .04em; }
 .badge-speaking { background: rgba(29,113,92,.15); color: var(--green-dark); }
 .badge-muted    { background: #f8e6e1; color: #9e3929; }
+.participant-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.participant-action { min-height: 27px; padding: 0 7px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--green-dark); font-size: 9px; font-weight: 700; }
+.participant-action:hover:not(:disabled) { background: var(--mint); }
+.participant-kick { width: 27px; height: 27px; color: var(--coral); }
+.participant-kick svg { width: 13px; height: 13px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
   .participant-avatar.is-speaking::after { animation: none; }
-}
+}
