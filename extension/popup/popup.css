@@ -118,7 +118,67 @@ input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(29, 113, 92
 .status-copy { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 #status-text { margin: 0; font-size: 12px; font-weight: 800; }
 .status-detail { min-height: 14px; margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
-.call-controls { display: flex; gap: 8px; margin-top: 10px; }
+.call-controls { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.call-controls-row { display: flex; gap: 8px; }
+
+/* ── Volume row ───────────────────────────────────────────────────── */
+.volume-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px 2px;
+}
+.volume-icon-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  color: var(--green);
+  transition: color .15s;
+}
+.volume-icon-btn.is-muted-vol { color: var(--coral); }
+.volume-icon-btn svg { width: 15px; height: 15px; }
+
+.volume-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 4px;
+  background: linear-gradient(to right, var(--green) 0%, var(--green) 100%, #d5dfd8 100%);
+  outline: none;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--green);
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.18);
+  cursor: pointer;
+  transition: background .15s, transform .12s;
+}
+.volume-slider::-webkit-slider-thumb:hover { background: var(--green-dark); transform: scale(1.18); }
+.volume-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--green);
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.18);
+  cursor: pointer;
+}
+.volume-label {
+  flex-shrink: 0;
+  width: 32px;
+  text-align: right;
+  font: 700 9px 'Consolas', monospace;
+  color: var(--muted);
+  letter-spacing: .02em;
+}
 .control-button { width: 38px; height: 38px; }
 .control-button.is-muted { border-color: #e8b5a8; background: #f8e6e1; color: #9e3929; }
 .text-button { border: 0; padding: 4px 0; background: none; color: var(--green); font-size: 10px; font-weight: 800; }
@@ -271,6 +331,92 @@ footer { padding-top: 8px; border-top: 1px solid var(--line); color: #819087; fo
 .badge { padding: 2px 5px; border-radius: 3px; font: 600 8px 'Consolas', monospace; letter-spacing: .04em; }
 .badge-speaking { background: rgba(29,113,92,.15); color: var(--green-dark); }
 .badge-muted    { background: #f8e6e1; color: #9e3929; }
+
+/* ── Admin mute button (host only, per-participant) ───────────────── */
+.participant-admin-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+.admin-mute-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(189,79,61,.35);
+  border-radius: 6px;
+  background: rgba(189,79,61,.06);
+  color: #bd4f3d;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .12s, opacity .15s;
+}
+.admin-mute-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.admin-mute-btn:hover:not(:disabled) {
+  background: rgba(189,79,61,.18);
+  border-color: rgba(189,79,61,.6);
+  transform: scale(1.08);
+}
+.admin-mute-btn:active:not(:disabled) { transform: scale(.96); }
+/* is-admin-muted = peer is currently admin-muted; button is now the UNMUTE action */
+.admin-mute-btn.is-admin-muted {
+  border-color: rgba(29,113,92,.35);
+  background: rgba(29,113,92,.08);
+  color: var(--green-dark);
+}
+.admin-mute-btn.is-admin-muted:hover:not(:disabled) {
+  background: rgba(29,113,92,.18);
+  border-color: rgba(29,113,92,.55);
+  transform: scale(1.08);
+}
+.admin-mute-btn:disabled { opacity: .48; cursor: not-allowed; transform: none; }
+
+/* ── Admin kick button ────────────────────────────────────────────── */
+.admin-kick-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(209,138,49,.4);
+  border-radius: 6px;
+  background: rgba(209,138,49,.07);
+  color: #a06820;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .12s, opacity .15s;
+}
+.admin-kick-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.admin-kick-btn:hover:not(:disabled) {
+  background: rgba(209,138,49,.2);
+  border-color: rgba(209,138,49,.65);
+  transform: scale(1.08);
+}
+.admin-kick-btn:active:not(:disabled) { transform: scale(.96); }
+.admin-kick-btn.is-confirming {
+  border-color: rgba(189,79,61,.7);
+  background: rgba(189,79,61,.15);
+  color: #9e3929;
+  animation: kick-pulse .6s ease-in-out infinite alternate;
+}
+@keyframes kick-pulse {
+  from { box-shadow: 0 0 0 0 rgba(189,79,61,.0); }
+  to   { box-shadow: 0 0 0 3px rgba(189,79,61,.25); }
+}
+.admin-kick-btn:disabled { opacity: .48; cursor: not-allowed; transform: none; }
+
+
+
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }

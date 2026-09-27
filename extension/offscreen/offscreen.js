@@ -31,6 +31,12 @@ const vadHandles = new Map();
 let audioCtx = null;
 // Our own display name for this call
 let myDisplayName = null;
+// Current remote audio volume [0, 1] — applied to all remote Audio elements
+let remoteVolume = 1;
+// Set when the host has admin-muted us — blocks self-unmute
+let adminMutedByHost = false;
+// Peers that WE (as host) have admin-muted — peerId → true
+const peerAdminMutedByUs = new Set();
 
 /* ── VAD threshold ──────────────────────────────────────────────────────
  * RMS energy above this value (0-255 scale from AnalyserNode) = speaking.
@@ -49,6 +55,7 @@ function buildPeerList() {
     muted: isMuted,
     speaking: !isMuted && speakingPeers.has("__local__"),
     isLocal: true,
+    adminMuted: false,   // local user is never shown as admin-muted to themselves
   }];
   for (const peerId of peerConnections.keys()) {
     list.push({
@@ -58,6 +65,7 @@ function buildPeerList() {
       muted: peerMutedStates.get(peerId) ?? false,
       speaking: speakingPeers.has(peerId),
       isLocal: false,
+      adminMuted: peerAdminMutedByUs.has(peerId),
     });
   }
   return list;
@@ -73,6 +81,7 @@ function publishStatus(status, detail = "") {
       detail,
       roomId: activeRoomId,
       userId: myUserId,
+      role: activeRole,
       muted:
         localStream?.getAudioTracks().every((track) => !track.enabled) ?? false,
       peers: buildPeerList(),
@@ -159,6 +168,44 @@ async function getOrCreatePeerConnection(targetPeerId, generation = callGenerati
         if (msg.type === "mute-state") {
           peerMutedStates.set(targetPeerId, !!msg.muted);
           publishStatus(callStatus);
+        } else if (msg.type === "admin-mute") {
+          // Host commanded us to mute — force local tracks off and lock unmute
+          adminMutedByHost = true;
+          if (localStream) {
+            localStream.getAudioTracks().forEach((t) => { t.enabled = false; });
+            speakingPeers.delete("__local__");
+            for (const pc of peerConnections.values()) {
+              for (const sender of pc.getSenders()) {
+                if (sender.track?.kind === "audio") sender.track.enabled = false;
+              }
+            }
+            for (const dc of peerDataChannels.values()) {
+              if (dc.readyState === "open") {
+                try { dc.send(JSON.stringify({ type: "mute-state", muted: true })); } catch {}
+              }
+            }
+          }
+          publishStatus(callStatus);
+        } else if (msg.type === "admin-unmute") {
+          // Host released the mute lock — re-enable mic
+          adminMutedByHost = false;
+          if (localStream) {
+            localStream.getAudioTracks().forEach((t) => { t.enabled = true; });
+            for (const pc of peerConnections.values()) {
+              for (const sender of pc.getSenders()) {
+                if (sender.track?.kind === "audio") sender.track.enabled = true;
+              }
+            }
+            for (const dc of peerDataChannels.values()) {
+              if (dc.readyState === "open") {
+                try { dc.send(JSON.stringify({ type: "mute-state", muted: false })); } catch {}
+              }
+            }
+          }
+          publishStatus(callStatus);
+        } else if (msg.type === "admin-kick") {
+          // Host kicked us — defer so DC message handler finishes before teardown
+          setTimeout(() => endCall(), 50);
         }
       } catch {}
     };
@@ -187,6 +234,7 @@ async function getOrCreatePeerConnection(targetPeerId, generation = callGenerati
       audioEl = new Audio();
       audioEl.autoplay = true;
       audioEl.playsInline = true;
+      audioEl.volume = remoteVolume;   // inherit current volume
       remoteAudios.set(targetPeerId, audioEl);
     }
     audioEl.srcObject = remoteStream;
@@ -542,6 +590,8 @@ async function endCall() {
   myPeerId = null;
   myUserId = null;
   myDisplayName = null;
+  adminMutedByHost = false;       // clear host-mute lock for next call
+  peerAdminMutedByUs.clear();     // clear admin-mute tracking for next call
   publishStatus("ended");
 }
 
@@ -557,6 +607,12 @@ chrome.runtime.onMessage.addListener((message) => {
     message.action === "toggle-mute" &&
     localStream
   ) {
+    // Block self-unmute when admin has locked the mic
+    if (adminMutedByHost) {
+      publishStatus(callStatus); // re-sync UI so muted indicator stays correct
+      return;
+    }
+
     // Determine target state: if ALL tracks are enabled → mute; else → unmute.
     const allEnabled = localStream.getAudioTracks().every((t) => t.enabled);
     const shouldMute = allEnabled;
@@ -596,5 +652,39 @@ chrome.runtime.onMessage.addListener((message) => {
       audioEl.play().catch(() => {});
     }
     publishStatus(callStatus);
+  } else if (message.type === "SET_VOLUME") {
+    // Clamp to [0, 1] for safety
+    remoteVolume = Math.min(1, Math.max(0, Number(message.volume) || 0));
+    for (const audioEl of remoteAudios.values()) {
+      audioEl.volume = remoteVolume;
+    }
+  } else if (message.type === "ADMIN_MUTE_PEER" && message.peerId) {
+    // Track and send admin-mute via data channel
+    peerAdminMutedByUs.add(message.peerId);
+    const dc = peerDataChannels.get(message.peerId);
+    if (dc?.readyState === "open") {
+      try { dc.send(JSON.stringify({ type: "admin-mute" })); } catch {}
+    }
+    publishStatus(callStatus);
+  } else if (message.type === "ADMIN_UNMUTE_PEER" && message.peerId) {
+    // Release admin-mute lock on the peer
+    peerAdminMutedByUs.delete(message.peerId);
+    const dc = peerDataChannels.get(message.peerId);
+    if (dc?.readyState === "open") {
+      try { dc.send(JSON.stringify({ type: "admin-unmute" })); } catch {}
+    }
+    publishStatus(callStatus);
+  } else if (message.type === "ADMIN_KICK_PEER" && message.peerId) {
+    // Tell the peer to leave, then close our side
+    const dc = peerDataChannels.get(message.peerId);
+    if (dc?.readyState === "open") {
+      try { dc.send(JSON.stringify({ type: "admin-kick" })); } catch {}
+    }
+    // Give the DC message a moment to transmit before tearing down
+    setTimeout(() => {
+      peerAdminMutedByUs.delete(message.peerId);
+      closePeer(message.peerId);
+      updateOverallStatus();
+    }, 300);
   }
 });

@@ -22,6 +22,10 @@ const displayNameInput = document.querySelector("#display-name");
 const participantsSection = document.querySelector("#participants-section");
 const participantsList    = document.querySelector("#participants-list");
 const participantsCount   = document.querySelector("#participants-count");
+const volumeSlider        = document.querySelector("#volume-slider");
+const volumeLabel         = document.querySelector("#volume-label");
+const volumeIconBtn       = document.querySelector("#volume-icon-btn");
+const volumeIconSvg       = document.querySelector("#volume-icon");
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 // Hosts already covered by manifest host_permissions — no runtime permission prompt needed
@@ -35,6 +39,7 @@ let lastCallParams = null;   // kept so "Done – Try again" can re-issue the sa
 
 let myUserId = null;
 let myDisplayName = null;
+let myRole = null;  // "host" | "guest" | null
 
 /* ── status labels ──────────────────────────────────── */
 const statusLabels = {
@@ -49,6 +54,42 @@ const statusLabels = {
 };
 
 /* ── helpers ────────────────────────────────────────── */
+
+// SVG path sets for the volume icon
+const VOL_HIGH_PATHS = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>`;
+const VOL_LOW_PATHS  = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>`;
+const VOL_MUTE_PATHS = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>`;
+
+let volumeMuted = false; // true when the user clicked the icon to silence all remotes
+let lastVolume  = 100;   // last non-zero slider value (for unmute restore)
+
+function updateVolumeSliderFill(value) {
+  const pct = value + "%";
+  volumeSlider.style.background =
+    `linear-gradient(to right, var(--green) 0%, var(--green) ${pct}, #d5dfd8 ${pct})`;
+}
+
+function applyVolumeIcon(value) {
+  if (volumeMuted || value === 0) {
+    volumeIconSvg.innerHTML = VOL_MUTE_PATHS;
+    volumeIconBtn.classList.add("is-muted-vol");
+  } else if (value < 50) {
+    volumeIconSvg.innerHTML = VOL_LOW_PATHS;
+    volumeIconBtn.classList.remove("is-muted-vol");
+  } else {
+    volumeIconSvg.innerHTML = VOL_HIGH_PATHS;
+    volumeIconBtn.classList.remove("is-muted-vol");
+  }
+}
+
+function setRemoteVolume(value) {
+  chrome.runtime.sendMessage({
+    target: "offscreen",
+    type: "SET_VOLUME",
+    volume: value / 100,
+  }).catch(() => {});
+}
+
 function updateServerTag(url) {
   if (!serverTag) return;
   try {
@@ -71,7 +112,8 @@ function hideMicGuide() {
   mainUi.hidden   = false;
 }
 
-function setStatus({ status = "idle", detail = "", roomId = null, muted = false, peers = [] }) {
+function setStatus({ status = "idle", detail = "", roomId = null, muted = false, peers = [], role = null }) {
+  if (role) myRole = role;
   statusText.textContent = statusLabels[status] || status;
   statusDetail.textContent = detail;
   signalIndicator.dataset.state = status;
@@ -127,14 +169,16 @@ function renderParticipants(peers, inCall) {
           <span class="participant-sub" hidden></span>
           <span class="participant-role"></span>
         </div>
-        <div class="participant-badges"></div>`;
+        <div class="participant-badges"></div>
+        <div class="participant-admin-actions"></div>`;
     }
 
-    const avatar   = card.querySelector(".participant-avatar");
-    const idEl     = card.querySelector(".participant-id");
-    const subEl    = card.querySelector(".participant-sub");
-    const roleEl   = card.querySelector(".participant-role");
-    const badgesEl = card.querySelector(".participant-badges");
+    const avatar      = card.querySelector(".participant-avatar");
+    const idEl        = card.querySelector(".participant-id");
+    const subEl       = card.querySelector(".participant-sub");
+    const roleEl      = card.querySelector(".participant-role");
+    const badgesEl    = card.querySelector(".participant-badges");
+    const adminActEl  = card.querySelector(".participant-admin-actions");
 
     // Primary label: displayName → userId → short peerId
     const primaryLabel = peer.displayName
@@ -169,6 +213,85 @@ function renderParticipants(peers, inCall) {
       b.className = "badge badge-muted"; b.textContent = "MUTED";
       badgesEl.appendChild(b);
     }
+
+    // Admin controls — only visible to the host, only on non-local peers
+    adminActEl.innerHTML = "";
+    if (myRole === "host" && !peer.isLocal) {
+      // ── Mute / Unmute toggle ──────────────────────────────────────
+      const muteBtn = document.createElement("button");
+      muteBtn.type = "button";
+
+      if (peer.adminMuted) {
+        // Currently admin-muted → show Unmute button
+        muteBtn.className = "admin-mute-btn is-admin-muted";
+        muteBtn.title = "Unmute this participant";
+        muteBtn.setAttribute("aria-label", "Unmute participant");
+        muteBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+        </svg>`;
+        muteBtn.addEventListener("click", () => {
+          sendBackgroundMessage({ type: "ADMIN_UNMUTE_PEER", peerId: peer.peerId }).catch(() => {});
+          muteBtn.disabled = true;
+          muteBtn.title = "Unmute sent…";
+        });
+      } else {
+        // Not admin-muted → show Mute button
+        muteBtn.className = "admin-mute-btn";
+        muteBtn.title = "Force mute this participant";
+        muteBtn.setAttribute("aria-label", "Force mute participant");
+        muteBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+          <path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path>
+          <line x1="2" y1="2" x2="22" y2="22"></line>
+        </svg>`;
+        muteBtn.addEventListener("click", () => {
+          sendBackgroundMessage({ type: "ADMIN_MUTE_PEER", peerId: peer.peerId }).catch(() => {});
+          muteBtn.disabled = true;
+          muteBtn.title = "Mute sent…";
+          muteBtn.classList.add("is-admin-muted");
+        });
+      }
+      adminActEl.appendChild(muteBtn);
+
+      // ── Kick button ──────────────────────────────────────────────
+      const kickBtn = document.createElement("button");
+      kickBtn.type = "button";
+      kickBtn.className = "admin-kick-btn";
+      kickBtn.title = "Remove this participant from the call";
+      kickBtn.setAttribute("aria-label", "Kick participant");
+      kickBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>`;
+
+      let kickConfirmTimer = null;
+      kickBtn.addEventListener("click", () => {
+        if (!kickBtn.classList.contains("is-confirming")) {
+          // First click — enter "confirm?" state
+          kickBtn.classList.add("is-confirming");
+          kickBtn.title = "Click again to confirm kick";
+          kickBtn.setAttribute("aria-label", "Click again to confirm kick");
+          // Auto-cancel after 3 s if user changes their mind
+          kickConfirmTimer = setTimeout(() => {
+            kickBtn.classList.remove("is-confirming");
+            kickBtn.title = "Remove this participant from the call";
+            kickBtn.setAttribute("aria-label", "Kick participant");
+          }, 3000);
+        } else {
+          // Second click — confirmed, send kick
+          clearTimeout(kickConfirmTimer);
+          kickBtn.disabled = true;
+          kickBtn.title = "Removing…";
+          kickBtn.classList.remove("is-confirming");
+          sendBackgroundMessage({ type: "ADMIN_KICK_PEER", peerId: peer.peerId }).catch(() => {});
+        }
+      });
+      adminActEl.appendChild(kickBtn);
+
+    }
+
 
     fragment.appendChild(card);
     existing.delete(key);
@@ -350,6 +473,49 @@ enableAudioButton.addEventListener("click", () => {
   chrome.runtime.sendMessage({ target: "offscreen", type: "ENABLE_AUDIO" });
 });
 
+/* ── volume controls ─────────────────────────────────── */
+
+// Initialise fill gradient on load
+updateVolumeSliderFill(Number(volumeSlider.value));
+applyVolumeIcon(Number(volumeSlider.value));
+
+// Slider — live update while dragging
+volumeSlider.addEventListener("input", () => {
+  const val = Number(volumeSlider.value);
+  volumeLabel.textContent = val + "%";
+  updateVolumeSliderFill(val);
+  if (val > 0) { lastVolume = val; volumeMuted = false; }
+  else         { volumeMuted = true; }
+  applyVolumeIcon(val);
+  setRemoteVolume(volumeMuted ? 0 : val);
+  chrome.storage.local.set({ remoteVolume: val }).catch(() => {});
+});
+
+// Icon button — click to toggle mute/unmute volume
+volumeIconBtn.addEventListener("click", () => {
+  if (volumeMuted || Number(volumeSlider.value) === 0) {
+    // Unmute: restore last non-zero level
+    const restore = lastVolume > 0 ? lastVolume : 100;
+    volumeSlider.value = restore;
+    volumeLabel.textContent = restore + "%";
+    volumeMuted = false;
+    updateVolumeSliderFill(restore);
+    applyVolumeIcon(restore);
+    setRemoteVolume(restore);
+    chrome.storage.local.set({ remoteVolume: restore }).catch(() => {});
+  } else {
+    // Mute: save current and set to 0
+    lastVolume = Number(volumeSlider.value);
+    volumeSlider.value = 0;
+    volumeLabel.textContent = "0%";
+    volumeMuted = true;
+    updateVolumeSliderFill(0);
+    applyVolumeIcon(0);
+    setRemoteVolume(0);
+    chrome.storage.local.set({ remoteVolume: 0 }).catch(() => {});
+  }
+});
+
 /* ── receive status updates from offscreen ──────────── */
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.target !== "popup" || msg.type !== "CALL_STATUS") return;
@@ -418,6 +584,21 @@ async function init() {
     myDisplayName = name || null;
     try { await chrome.storage.local.set({ displayName: name }); } catch { /* ok */ }
   });
+
+  // Restore saved remote volume
+  try {
+    const stored = await chrome.storage.local.get("remoteVolume");
+    if (stored.remoteVolume != null) {
+      const vol = Number(stored.remoteVolume);
+      volumeSlider.value = vol;
+      volumeLabel.textContent = vol + "%";
+      if (vol === 0) { volumeMuted = true; lastVolume = 100; }
+      else           { lastVolume = vol; }
+      updateVolumeSliderFill(vol);
+      applyVolumeIcon(vol);
+      setRemoteVolume(volumeMuted ? 0 : vol);
+    }
+  } catch { /* ok */ }
 
   chrome.runtime.sendMessage({ target: "background", type: "GET_CALL_STATUS" }).catch(() => {});
 }
